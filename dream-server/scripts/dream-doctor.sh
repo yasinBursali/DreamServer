@@ -13,23 +13,6 @@ if [[ -f "$ROOT_DIR/lib/service-registry.sh" ]]; then
     export SCRIPT_DIR="$ROOT_DIR"
     . "$ROOT_DIR/lib/service-registry.sh"
     sr_load
-<<<<<<< HEAD
-=======
-    if [[ -f "$ROOT_DIR/.env" ]]; then
-        set -a
-        while IFS='=' read -r key value; do
-            [[ "$key" =~ ^[[:space:]]*# ]] && continue
-            [[ -z "$key" ]] && continue
-            [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-            value="${value%\"}"
-            value="${value#\"}"
-            value="${value%\'}"
-            value="${value#\'}"
-            export "$key=$value"
-        done < "$ROOT_DIR/.env"
-        set +a
-    fi
->>>>>>> upstream/main
 fi
 if [[ -f "$ROOT_DIR/lib/safe-env.sh" ]]; then
     . "$ROOT_DIR/lib/safe-env.sh"
