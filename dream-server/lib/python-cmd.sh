@@ -2,8 +2,7 @@
 
 # Dream Server: Python command resolver
 # Goal: Prefer python3 when available, but gracefully fall back to python (common on some Windows setups).
-
-set -euo pipefail
+# This file is sourced by other scripts, so it must not change the caller's shell options.
 
 _ds_python_cmd_cached=""
 
