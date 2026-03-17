@@ -113,6 +113,36 @@ test_llm() {
     return 1
 }
 
+# Check Docker container state for a service
+# Returns: 0 if running, 1 if not running (sets container_state result)
+check_container_state() {
+    local sid="$1"
+    local container="${SERVICE_CONTAINERS[$sid]}"
+
+    # Skip if docker not available
+    if ! command -v docker &>/dev/null; then
+        return 0
+    fi
+
+    # Get container state via docker inspect
+    local state=$(docker inspect --format '{{.State.Status}}' "$container" 2>/dev/null)
+
+    if [[ -z "$state" ]]; then
+        result_set "${sid}_container" "not_found"
+        return 1
+    elif [[ "$state" == "running" ]]; then
+        result_set "${sid}_container" "running"
+        return 0
+    elif [[ "$state" == "restarting" ]]; then
+        result_set "${sid}_container" "restarting"
+        return 1
+    else
+        # exited, paused, dead, created
+        result_set "${sid}_container" "$state"
+        return 1
+    fi
+}
+
 # Generic registry-driven service health check
 test_service() {
     local sid="$1"
@@ -126,6 +156,13 @@ test_service() {
     [[ -n "$port_env" ]] && port="${!port_env:-$default_port}"
 
     [[ -z "$health" || "$port" == "0" ]] && return 1
+
+    # Check container state first (if docker available)
+    if ! check_container_state "$sid" 2>/dev/null; then
+        result_set "$sid" "fail"
+        ANY_FAIL=true
+        return 1
+    fi
 
     if curl -sf --max-time "$timeout" "http://localhost:${port}${health}" >/dev/null 2>&1; then
         result_set "$sid" "ok"
@@ -247,7 +284,25 @@ for sid in "${CORE_SIDS[@]}"; do
         if [[ "$result" == "ok:$sid" ]]; then
             log "  ${GREEN}✓${NC} $name - healthy"
         else
-            log "  ${YELLOW}!${NC} $name - not responding"
+            # Check container state for better error message
+            container_state=$(result_get "${sid}_container")
+            case "$container_state" in
+                not_found)
+                    log "  ${YELLOW}!${NC} $name - container not found"
+                    ;;
+                exited|stopped)
+                    log "  ${YELLOW}!${NC} $name - container stopped"
+                    ;;
+                restarting)
+                    log "  ${YELLOW}!${NC} $name - container restarting"
+                    ;;
+                running)
+                    log "  ${YELLOW}!${NC} $name - not responding (container running)"
+                    ;;
+                *)
+                    log "  ${YELLOW}!${NC} $name - not responding"
+                    ;;
+            esac
         fi
     fi
 done
@@ -280,7 +335,25 @@ for sid in "${EXT_SIDS[@]}"; do
         if [[ "$result" == "ok:$sid" ]]; then
             log "  ${GREEN}✓${NC} $name - healthy"
         else
-            log "  ${YELLOW}!${NC} $name - not responding"
+            # Check container state for better error message
+            container_state=$(result_get "${sid}_container")
+            case "$container_state" in
+                not_found)
+                    log "  ${YELLOW}!${NC} $name - container not found"
+                    ;;
+                exited|stopped)
+                    log "  ${YELLOW}!${NC} $name - container stopped"
+                    ;;
+                restarting)
+                    log "  ${YELLOW}!${NC} $name - container restarting"
+                    ;;
+                running)
+                    log "  ${YELLOW}!${NC} $name - not responding (container running)"
+                    ;;
+                *)
+                    log "  ${YELLOW}!${NC} $name - not responding"
+                    ;;
+            esac
         fi
     fi
 done
