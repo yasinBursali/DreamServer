@@ -698,13 +698,13 @@ cmd_health() {
     done
     
     # Check dashboard API health endpoint
-    local dashboard_port="${DASHBOARD_PORT:-3002}"
-    if curl -sf "http://localhost:${dashboard_port}/api/health" &>/dev/null; then
+    local dashboard_api_port="${DASHBOARD_API_PORT:-3002}"
+    if curl -sf "http://localhost:${dashboard_api_port}/health" &>/dev/null; then
         log_ok "Dashboard API: healthy"
-    elif curl -sf "http://localhost:${dashboard_port}/api/status" &>/dev/null; then
+    elif curl -sf "http://localhost:${dashboard_api_port}/api/status" &>/dev/null; then
         log_ok "Dashboard API: responding"
     else
-        log_warn "Dashboard API: not responding on port ${dashboard_port}"
+        log_warn "Dashboard API: not responding on port ${dashboard_api_port}"
     fi
     
     # Check llama-server health
