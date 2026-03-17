@@ -17,6 +17,7 @@
 #   Change model download logic or compose launch flags here.
 # ============================================================================
 
+dream_progress 75 "services" "Starting services"
 show_phase 5 6 "Starting Services" "~2-3 minutes"
 
 if $DRY_RUN; then
@@ -240,6 +241,22 @@ load-on-startup = true
 n-ctx = ${MAX_CONTEXT}
 MODELS_INI_EOF
         ai_ok "Generated models.ini for llama-server"
+    fi
+
+    # Validate service dependencies before launching
+    if [[ -f "$INSTALL_DIR/lib/service-registry.sh" && -f "$INSTALL_DIR/lib/validate-dependencies.sh" ]]; then
+        . "$INSTALL_DIR/lib/service-registry.sh"
+        . "$INSTALL_DIR/lib/validate-dependencies.sh"
+        sr_load
+
+        ai "Validating service dependencies..."
+        if ! validate_service_dependencies; then
+            ai_err "Service dependency validation failed"
+            ai "Some services depend on other services that are not enabled"
+            ai "Enable required services or disable dependent services to continue"
+            exit 1
+        fi
+        ai_ok "All service dependencies satisfied"
     fi
 
     # Launch containers
