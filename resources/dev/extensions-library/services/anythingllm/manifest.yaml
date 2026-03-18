@@ -13,31 +13,60 @@ service:
   health: /api/health
   type: docker
   gpu_backends: [nvidia, amd]
+  compose_file: compose.yaml
   category: optional
   depends_on: [ollama]
   description: |
     All-in-one AI productivity tool for RAG chat with documents.
     Built-in vector database, supports multiple LLM providers,
     and runs entirely on-device for privacy.
-  
-  features:
-    rag:
-      description: RAG chat with uploaded documents
-      vram_required_mb: 0
-    chat:
-      description: Chat interface with multiple LLM providers
-      vram_required_mb: 0
-    embed:
-      description: Built-in embedding and vector search
-      vram_required_mb: 0
-    agents:
-      description: AI agents for automated workflows
-      vram_required_mb: 2048
-    
-  tags:
-    - chat
-    - rag
-    - documents
-    - vector-db
-    - privacy
-    - local
+
+features:
+  - id: rag
+    name: RAG Document Chat
+    description: RAG chat with uploaded documents
+    icon: FileSearch
+    category: ai
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [anythingllm]
+    setup_time: ~2 minutes
+    requirements:
+      services: [anythingllm]
+      vram_gb: 0
+    priority: 6
+  - id: chat
+    name: Multi-Provider Chat
+    description: Chat interface with multiple LLM providers
+    icon: MessageSquare
+    category: chat
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [anythingllm]
+    setup_time: ~2 minutes
+    requirements:
+      services: [anythingllm]
+      vram_gb: 0
+    priority: 7
+  - id: embed
+    name: Built-in Embeddings
+    description: Built-in embedding and vector search
+    icon: Database
+    category: data
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [anythingllm]
+    setup_time: ~2 minutes
+    requirements:
+      services: [anythingllm]
+      vram_gb: 0
+    priority: 8
+  - id: agents
+    name: AI Workflow Agents
+    description: AI agents for automated workflows
+    icon: Bot
+    category: ai
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [anythingllm]
+    setup_time: ~2 minutes
+    requirements:
+      services: [anythingllm]
+      vram_gb: 2
+    priority: 9

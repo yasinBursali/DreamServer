@@ -7,7 +7,7 @@ service:
   container_name: dream-text-generation-webui
   host_env: TEXT_GEN_WEBUI_HOST
   default_host: text-generation-webui
-  port: 7862
+  port: 7860
   external_port_env: TEXT_GEN_WEBUI_PORT
   external_port_default: 7862
   health: /
@@ -24,28 +24,64 @@ service:
     loading, and advanced generation parameters. The goto tool for power users
     who need full control over inference settings.
 
-  features:
-    inference:
-      description: Load and run GGUF, GPTQ, AWQ, EXL2, and HF transformer models
-      vram_required_mb: 0
-    chat-ui:
-      description: Instruct and chat mode UI with character support
-      vram_required_mb: 0
-    openai-api:
-      description: OpenAI-compatible API server (port 5001)
-      vram_required_mb: 0
-    extensions:
-      description: Built-in extensions for Whisper STT, Silero TTS, and more
-      vram_required_mb: 512
-    lora:
-      description: LoRA adapter loading and merging
-      vram_required_mb: 0
-
-  tags:
-    - llm
-    - inference
-    - oobabooga
-    - chat
-    - api
-    - gguf
-    - gptq
+features:
+  - id: inference
+    name: Multi-Format Model Loading
+    description: Load and run GGUF, GPTQ, AWQ, EXL2, and HF transformer models
+    icon: Cpu
+    category: ai
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [text-generation-webui]
+    setup_time: ~2 minutes
+    requirements:
+      services: [text-generation-webui]
+      vram_gb: 0
+    priority: 5
+  - id: chat-ui
+    name: Chat Interface
+    description: Instruct and chat mode UI with character support
+    icon: MessageSquare
+    category: chat
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [text-generation-webui]
+    setup_time: ~2 minutes
+    requirements:
+      services: [text-generation-webui]
+      vram_gb: 0
+    priority: 6
+  - id: openai-api
+    name: OpenAI-Compatible API
+    description: OpenAI-compatible API server (port 5001)
+    icon: Code
+    category: ai
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [text-generation-webui]
+    setup_time: ~2 minutes
+    requirements:
+      services: [text-generation-webui]
+      vram_gb: 0
+    priority: 7
+  - id: extensions
+    name: Extensions Marketplace
+    description: Built-in extensions for Whisper STT, Silero TTS, and more
+    icon: Puzzle
+    category: ai
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [text-generation-webui]
+    setup_time: ~2 minutes
+    requirements:
+      services: [text-generation-webui]
+      vram_gb: 0.5
+    priority: 8
+  - id: lora
+    name: LoRA Adapter Loading
+    description: LoRA adapter loading and merging
+    icon: Layers
+    category: ai
+    gpu_backends: [nvidia, amd]
+    enabled_services_all: [text-generation-webui]
+    setup_time: ~2 minutes
+    requirements:
+      services: [text-generation-webui]
+      vram_gb: 0
+    priority: 9
