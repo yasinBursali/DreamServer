@@ -16,3 +16,17 @@ service:
   compose_file: compose.yaml
   category: recommended
   depends_on: []
+
+features:
+  - id: voice-cloning-tts
+    name: Voice Cloning TTS
+    description: High-quality text-to-speech with voice cloning capabilities
+    icon: Mic
+    category: voice
+    requirements:
+      services: [xtts]
+      vram_gb: 4
+    enabled_services_all: [xtts]
+    setup_time: ~3 minutes
+    priority: 6
+    gpu_backends: [amd, nvidia]

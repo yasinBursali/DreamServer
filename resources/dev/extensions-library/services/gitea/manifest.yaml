@@ -12,7 +12,7 @@ service:
   external_port_default: 7830
   health: /api/healthz
   type: docker
-  gpu_backends: []
+  gpu_backends: [all]
   compose_file: compose.yaml
   category: optional
   depends_on: []
@@ -39,3 +39,16 @@ service:
     - key: GITEA_ADMIN_EMAIL
       description: "Default admin email"
       default: "admin@localhost"
+
+features:
+  - id: git-hosting
+    name: Self-Hosted Git
+    description: Lightweight self-hosted Git service with web interface
+    icon: GitBranch
+    category: development
+    requirements:
+      services: [gitea]
+      vram_gb: 0
+    enabled_services_all: [gitea]
+    setup_time: ~1 minute
+    priority: 12

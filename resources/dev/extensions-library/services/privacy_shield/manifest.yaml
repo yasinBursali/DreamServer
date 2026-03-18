@@ -16,3 +16,17 @@ service:
   compose_file: compose.yaml
   category: optional
   depends_on: [llama-server]
+
+features:
+  - id: pii-protection
+    name: PII Protection
+    description: Automatic detection and redaction of personally identifiable information
+    icon: Shield
+    category: privacy
+    requirements:
+      services: [privacy_shield]
+      vram_gb: 2
+    enabled_services_all: [privacy_shield]
+    setup_time: ~2 minutes
+    priority: 3
+    gpu_backends: [amd, nvidia]

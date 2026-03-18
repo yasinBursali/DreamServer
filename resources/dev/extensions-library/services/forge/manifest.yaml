@@ -20,23 +20,49 @@ service:
     Features extensive model support, extensions, inpainting, outpainting,
     and professional-grade image generation capabilities. GPU required.
 
-  features:
-    image-generation:
-      description: Full Stable Diffusion control with advanced settings
-      vram_required_mb: 8192
-    inpainting:
-      description: Inpainting with mask support
-      vram_required_mb: 8192
-    outpainting:
-      description: Outpainting beyond image boundaries
-      vram_required_mb: 8192
-    upscaling:
-      description: High-resolution upscaling with multiple engines
-      vram_required_mb: 4096
+features:
+  - id: image-generation
+    name: Image Generation
+    description: Full Stable Diffusion control with advanced settings
+    icon: Image
+    category: media
+    requirements:
+      services: [forge]
+      vram_gb: 8
+    enabled_services_all: [forge]
+    setup_time: ~5 minutes
+    priority: 8
+    gpu_backends: [nvidia]
 
-  tags:
-    - image
-    - stable-diffusion
-    - webui
-    - generative
-    - professional
+  - id: inpainting
+    name: Inpainting & Outpainting
+    description: Inpainting with mask support and outpainting beyond image boundaries
+    icon: Paintbrush
+    category: media
+    requirements:
+      services: [forge]
+      vram_gb: 8
+    enabled_services_all: [forge]
+    setup_time: ~5 minutes
+    priority: 9
+    gpu_backends: [nvidia]
+
+  - id: upscaling
+    name: Image Upscaling
+    description: High-resolution upscaling with multiple engines
+    icon: Maximize
+    category: media
+    requirements:
+      services: [forge]
+      vram_gb: 4
+    enabled_services_all: [forge]
+    setup_time: ~5 minutes
+    priority: 10
+    gpu_backends: [nvidia]
+
+tags:
+  - image
+  - stable-diffusion
+  - webui
+  - generative
+  - professional

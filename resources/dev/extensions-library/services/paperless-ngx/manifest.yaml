@@ -22,24 +22,35 @@ service:
     documents into a searchable online archive. OCR, tagging, automatic
     classification, and full-text search for PDFs and images.
 
-  features:
-    ocr:
-      description: Automatic OCR for scanned PDFs and images
-      vram_required_mb: 0
-    document-tags:
-      description: Auto and manual tagging for organization
-      vram_required_mb: 0
-    fulltext-search:
-      description: Search inside all your documents
-      vram_required_mb: 0
-    email-import:
-      description: Import documents via email
-      vram_required_mb: 0
+features:
+  - id: document-management
+    name: Document Management
+    description: Searchable document archive with OCR, tagging, and full-text search
+    icon: FileText
+    category: productivity
+    requirements:
+      services: [paperless-ngx]
+      vram_gb: 0
+    enabled_services_all: [paperless-ngx]
+    setup_time: ~2 minutes
+    priority: 14
 
-  tags:
-    - documents
-    - ocr
-    - archive
-    - pdf
-    - search
-    - productivity
+  - id: auto-classification
+    name: Auto Classification
+    description: Automatic document tagging and classification with email import
+    icon: Tag
+    category: productivity
+    requirements:
+      services: [paperless-ngx]
+      vram_gb: 0
+    enabled_services_all: [paperless-ngx]
+    setup_time: ~2 minutes
+    priority: 15
+
+tags:
+  - documents
+  - ocr
+  - archive
+  - pdf
+  - search
+  - productivity

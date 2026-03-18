@@ -12,7 +12,7 @@ service:
   external_port_default: 7803
   health: /
   type: docker
-  gpu_backends: [amd, nvidia]
+  gpu_backends: [all]
   category: optional
   depends_on: [llama-server]
 
@@ -20,20 +20,64 @@ features:
   - id: text-generation
     name: Text Generation
     description: Generate text with local LLMs via OpenAI-compatible API
-    vram_mb: 4096
+    icon: MessageSquare
+    category: ai
+    requirements:
+      services: [localai]
+      vram_gb: 4
+    enabled_services_all: [localai]
+    setup_time: ~3 minutes
+    priority: 5
+    gpu_backends: [all]
+
   - id: image-generation
     name: Image Generation
     description: Generate images with local diffusion models
-    vram_mb: 8192
+    icon: Image
+    category: media
+    requirements:
+      services: [localai]
+      vram_gb: 8
+    enabled_services_all: [localai]
+    setup_time: ~5 minutes
+    priority: 8
+    gpu_backends: [all]
+
   - id: audio-generation
     name: Audio Generation
-    description: Generate audio with local models
-    vram_mb: 4096
+    description: Generate audio and clone voices with local models
+    icon: Volume2
+    category: media
+    requirements:
+      services: [localai]
+      vram_gb: 4
+    enabled_services_all: [localai]
+    setup_time: ~3 minutes
+    priority: 9
+    gpu_backends: [all]
+
   - id: video-generation
     name: Video Generation
     description: Generate video with local models
-    vram_mb: 16384
+    icon: Video
+    category: media
+    requirements:
+      services: [localai]
+      vram_gb: 16
+    enabled_services_all: [localai]
+    setup_time: ~5 minutes
+    priority: 10
+    gpu_backends: [all]
+
   - id: voice-cloning
     name: Voice Cloning
     description: Clone voices for TTS with local models
-    vram_mb: 4096
+    icon: Mic
+    category: voice
+    requirements:
+      services: [localai]
+      vram_gb: 4
+    enabled_services_all: [localai]
+    setup_time: ~3 minutes
+    priority: 11
+    gpu_backends: [all]

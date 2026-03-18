@@ -23,27 +23,35 @@ service:
     complex problems. Perfect for building agent teams that simulate real-world
     collaboration and decision-making.
 
-  features:
-    multi-agent:
-      description: Teams of autonomous AI agents working together
-      vram_required_mb: 0
-    task-delegation:
-      description: Automatic task distribution between agents
-      vram_required_mb: 0
-    sequential-process:
-      description: Step-by-step task execution with defined order
-      vram_required_mb: 0
-    hierarchical-process:
-      description: Manager-led coordination with validation
-      vram_required_mb: 0
-    flows:
-      description: Event-driven workflows for complex automations
-      vram_required_mb: 0
+features:
+  - id: multi-agent-orchestration
+    name: Multi-Agent Orchestration
+    description: Teams of autonomous AI agents working together with task delegation
+    icon: Bot
+    category: ai
+    requirements:
+      services: [crewai]
+      vram_gb: 0
+    enabled_services_all: [crewai]
+    setup_time: ~2 minutes
+    priority: 7
 
-  tags:
-    - multi-agent
-    - orchestration
-    - automation
-    - autonomous-agents
-    - workflow
-    - python
+  - id: workflow-processes
+    name: Workflow Processes
+    description: Sequential and hierarchical task execution with manager-led coordination
+    icon: GitBranch
+    category: ai
+    requirements:
+      services: [crewai]
+      vram_gb: 0
+    enabled_services_all: [crewai]
+    setup_time: ~2 minutes
+    priority: 8
+
+tags:
+  - multi-agent
+  - orchestration
+  - automation
+  - autonomous-agents
+  - workflow
+  - python

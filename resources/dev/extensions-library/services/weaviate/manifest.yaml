@@ -22,21 +22,35 @@ service:
     Supports semantic search, hybrid search, structured filtering, and multi-tenancy.
     A cloud-native alternative to ChromaDB with gRPC support and horizontal scaling.
 
-  features:
-    vector-search:
-      description: Semantic similarity search with vector embeddings
-      vram_required_mb: 0
-    hybrid-search:
-      description: Combine vector similarity with keyword matching
-      vram_required_mb: 0
-    multi-tenancy:
-      description: Isolated data spaces for different users/organizations
-      vram_required_mb: 0
+features:
+  - id: vector-search
+    name: Vector Search
+    description: Semantic similarity search with vector embeddings
+    icon: Search
+    category: data
+    requirements:
+      services: [weaviate]
+      vram_gb: 0
+    enabled_services_all: [weaviate]
+    setup_time: ~1 minute
+    priority: 9
 
-  tags:
-    - vector-database
-    - semantic-search
-    - embeddings
-    - open-source
-    - scalable
-    - local
+  - id: hybrid-search
+    name: Hybrid Search
+    description: Combine vector similarity with keyword matching and multi-tenancy
+    icon: Database
+    category: data
+    requirements:
+      services: [weaviate]
+      vram_gb: 0
+    enabled_services_all: [weaviate]
+    setup_time: ~1 minute
+    priority: 10
+
+tags:
+  - vector-database
+  - semantic-search
+  - embeddings
+  - open-source
+  - scalable
+  - local
