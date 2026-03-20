@@ -78,6 +78,21 @@ elif [[ "$GPU_BACKEND" == "amd" ]] && ! $DRY_RUN; then
         fi
     fi
 
+    # ── BIOS recommendation for unified memory APU ──
+    ai ""
+    ai "╔══════════════════════════════════════════════════════════════════╗"
+    ai "║  BIOS SETUP (one-time, manual step for best performance):      ║"
+    ai "║                                                                ║"
+    ai "║  Set UMA Frame Buffer Size → 512 MB (minimum)                 ║"
+    ai "║                                                                ║"
+    ai "║  This lets Dream Server use your full unified memory pool.     ║"
+    ai "║  Location varies by vendor:                                    ║"
+    ai "║    HP:   Advanced → Display → UMA Frame Buffer Size            ║"
+    ai "║    ASUS: Advanced → AMD CBS → NBIO → GFX → UMA Frame Buffer   ║"
+    ai "║    Lenovo: Advanced → AMD PBS → UMA Frame Buffer Size          ║"
+    ai "╚══════════════════════════════════════════════════════════════════╝"
+    ai ""
+
     # Install GTT memory optimization for unified memory APU
     # Dynamically calculate GTT size based on total RAM — use ~65% for GPU, leave rest for OS/Docker
     total_ram_mb=$(awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo "0")
@@ -98,7 +113,11 @@ options ttm pages_limit=${pages_limit}
 options ttm page_pool_size=${page_pool_size}
 GTT_EOF
         if sudo -n cp /tmp/dream-gtt-tuning.conf /etc/modprobe.d/amdgpu_llm_optimized.conf 2>/dev/null; then
+            # Rebuild initramfs so the new modprobe config takes effect on next boot
+            sudo -n update-initramfs -u >> "$LOG_FILE" 2>&1 || \
+                sudo -n dracut --force >> "$LOG_FILE" 2>&1 || true
             ai_ok "GTT memory tuning installed (gttsize=${gtt_size}MB of ${total_ram_mb}MB, 65%)"
+            _amd_needs_reboot=true
         else
             ai_warn "Could not install GTT memory config (needs sudo). Copy manually:"
             ai "  sudo cp /tmp/dream-gtt-tuning.conf /etc/modprobe.d/amdgpu_llm_optimized.conf"
@@ -153,4 +172,19 @@ GTT_EOF
 
     # LiteLLM config already copied by rsync/cp block above
     [[ -f "$INSTALL_DIR/config/litellm/strix-halo-config.yaml" ]] && ai_ok "LiteLLM Strix Halo routing config installed"
+
+    # Reboot notice if kernel-level changes were made
+    if [[ "${_amd_needs_reboot:-}" == "true" ]]; then
+        ai ""
+        ai "╔══════════════════════════════════════════════════════════════════╗"
+        ai "║  REBOOT REQUIRED                                               ║"
+        ai "║                                                                ║"
+        ai "║  GPU memory tuning was installed but requires a reboot to      ║"
+        ai "║  take effect. Dream Server will work now, but GPU-accelerated  ║"
+        ai "║  inference won't use unified memory until you reboot.          ║"
+        ai "║                                                                ║"
+        ai "║  Run: sudo reboot                                             ║"
+        ai "╚══════════════════════════════════════════════════════════════════╝"
+        ai ""
+    fi
 fi
