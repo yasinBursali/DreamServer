@@ -16,6 +16,11 @@ service:
   category: optional
   depends_on: []
   compose_file: compose.yaml
+  env_vars:
+    - key: OPEN_INTERPRETER_API_KEY
+      description: API key for Open Interpreter authentication (required — compose will fail without it)
+      required: true
+      secret: true
   description: |
     Open Interpreter lets LLMs run code locally (Python, JavaScript, Shell, etc.).
     It provides a ChatGPT-like interface in your terminal and can control Chrome,

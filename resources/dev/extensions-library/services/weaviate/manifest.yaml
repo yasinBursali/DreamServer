@@ -16,7 +16,11 @@ service:
   compose_file: compose.yaml
   category: optional
   depends_on: []
-  env_vars: []
+  env_vars:
+    - key: WEAVIATE_API_KEY
+      description: API key for Weaviate authentication (required — compose will fail without it)
+      required: true
+      secret: true
   description: |
     Weaviate is an open-source vector database that stores both objects and vectors.
     Supports semantic search, hybrid search, structured filtering, and multi-tenancy.
