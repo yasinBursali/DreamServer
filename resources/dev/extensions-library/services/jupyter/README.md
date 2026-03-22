@@ -11,13 +11,13 @@ Jupyter Notebook provides an interactive environment for scientific computing, d
 - **Interactive Notebooks**: Create and share documents with code and visualizations
 - **Multiple Languages**: Python, R, Julia support
 - **Scientific Stack**: NumPy, SciPy, Pandas, Matplotlib, Scikit-learn pre-installed
-- **Web Interface**: Access via web browser on port 8888
+- **Web Interface**: Access via web browser on port 8889
 
 ## Configuration
 
 ### Environment Variables
 
-- `JUPYTER_PORT` - Port for web interface (default: 8888)
+- `JUPYTER_PORT` - Port for web interface (default: 8889)
 - `JUPYTER_TOKEN` - Authentication token (default: jupyter)
 - `LLM_API_URL` - URL for your LLM API (from .env)
 
@@ -29,7 +29,7 @@ Jupyter Notebook provides an interactive environment for scientific computing, d
 
 ### Ports
 
-- `8888` - Web interface
+- `8889` - Web interface
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ docker-compose -f extensions/services/jupyter/compose.yaml up -d
 
 ### Web Interface
 
-Access the web interface at `http://localhost:8888`.
+Access the web interface at `http://localhost:8889`.
 
 Default token: `jupyter`
 

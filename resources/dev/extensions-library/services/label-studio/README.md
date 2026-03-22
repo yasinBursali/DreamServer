@@ -14,12 +14,12 @@ Open source data labeling tool for machine learning.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LABEL_STUDIO_HOST` | `label-studio` | Hostname for service |
-| `LABEL_STUDIO_PORT` | `8085` | External port for UI |
+| `LABEL_STUDIO_PORT` | `8086` | External port for UI |
 
 ## Usage
 
 1. Start the service: `docker compose up -d`
-2. Access at `http://localhost:8085`
+2. Access at `http://localhost:8086`
 3. Create a project and import data for labeling
 
 ## Data Persistence

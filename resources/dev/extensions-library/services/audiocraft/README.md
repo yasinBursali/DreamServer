@@ -26,7 +26,7 @@ AudioCraft is a PyTorch library for deep learning research on audio generation. 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AUDIOCRAFT_PORT` | 7860 | External port for the UI |
+| `AUDIOCRAFT_PORT` | 7863 | External port for the UI |
 | `AUDIOCRAFT_HOST` | audiocraft | Hostname for service discovery |
 
 ## Data Persistence
@@ -37,7 +37,7 @@ AudioCraft is a PyTorch library for deep learning research on audio generation. 
 ## Usage
 
 1. Enable the extension in the Dream Dashboard
-2. Access the UI at `http://localhost:7860`
+2. Access the UI at `http://localhost:7863`
 3. Use the MusicGen tab to generate music
 4. Use the AudioGen tab to generate sound effects
 

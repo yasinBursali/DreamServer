@@ -9,7 +9,7 @@ service:
   default_host: jupyter
   port: 8888
   external_port_env: JUPYTER_PORT
-  external_port_default: 8888
+  external_port_default: 8889
   health: /tree
   type: docker
   gpu_backends: [amd, nvidia]

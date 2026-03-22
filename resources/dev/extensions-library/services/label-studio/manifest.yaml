@@ -9,7 +9,7 @@ service:
   default_host: label-studio
   port: 8080
   external_port_env: LABEL_STUDIO_PORT
-  external_port_default: 8085
+  external_port_default: 8086
   health: /health
   type: docker
   gpu_backends: [none]
