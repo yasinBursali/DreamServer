@@ -9,7 +9,7 @@ RVC (Retrieval-Based Voice Conversion) is an open-source voice conversion framew
 ## Features
 
 - **Voice Conversion**: Transform voices while preserving speaker characteristics
-- **Web UI**: Easy-to-use interface on port 7860
+- **Web UI**: Easy-to-use interface on port 7809
 - **Local Processing**: All processing happens locally
 - **Multiple Models**: Support for various RVC models
 
@@ -17,19 +17,19 @@ RVC (Retrieval-Based Voice Conversion) is an open-source voice conversion framew
 
 ### Environment Variables
 
-- `RVC_PORT` - Port for web interface (default: 7860)
+- `RVC_PORT` - Port for web interface (default: 7809)
 - `RVC_API_KEY` - API key for RVC service authentication (optional; leave empty to disable auth)
 
 ### Volumes
 
-- `./data/rvc/models` - RVC models storage
-- `./data/rvc/voices` - Input/output voices
-- `./data/rvc/index` - Index files for voice conversion
+- `./data/rvc/weights` - Model weights storage
+- `./data/rvc/opt` - Optimization files
+- `./data/rvc/dataset` - Training datasets
 - `./data/rvc/logs` - Processing logs
 
 ### Ports
 
-- `7860` - Web interface
+- `7865` (internal), `7809` (external default) - Web interface
 
 ## Quick Start
 
@@ -49,7 +49,7 @@ docker-compose -f extensions/services/rvc/compose.yaml up -d
 
 ### Web Interface
 
-Access the web interface at `http://localhost:7860`.
+Access the web interface at `http://localhost:7809`.
 
 ### Voice Conversion Workflow
 
