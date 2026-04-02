@@ -9,7 +9,7 @@
 function Invoke-OptionalCommand {
     param(
         [string]$Command,
-        [string[]]$Args = @(),
+        [string[]]$CommandArgs = @(),
         [int]$MaxLines = 120
     )
 
@@ -22,7 +22,7 @@ function Invoke-OptionalCommand {
     try {
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "SilentlyContinue"
-        $output = & $Command @Args 2>&1 | ForEach-Object { $_.ToString() }
+        $output = & $Command @CommandArgs 2>&1 | ForEach-Object { $_.ToString() }
         $exitCode = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
 
@@ -67,8 +67,6 @@ function Test-HttpEndpoint {
 function New-DreamInstallReport {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$InstallDir,
-        [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [string[]]$ComposeFlags
     )
@@ -104,10 +102,10 @@ function New-DreamInstallReport {
         }
         compose = [ordered]@{
             flags = @($ComposeFlags)
-            docker_version = Invoke-OptionalCommand -Command "docker" -Args @("version") -MaxLines 40
-            docker_info = Invoke-OptionalCommand -Command "docker" -Args @("info") -MaxLines 80
-            compose_config = Invoke-OptionalCommand -Command "docker" -Args $composeConfigArgs
-            compose_ps = Invoke-OptionalCommand -Command "docker" -Args $composePsArgs -MaxLines 80
+            docker_version = Invoke-OptionalCommand -Command "docker" -CommandArgs @("version") -MaxLines 40
+            docker_info = Invoke-OptionalCommand -Command "docker" -CommandArgs @("info") -MaxLines 80
+            compose_config = Invoke-OptionalCommand -Command "docker" -CommandArgs $composeConfigArgs
+            compose_ps = Invoke-OptionalCommand -Command "docker" -CommandArgs $composePsArgs -MaxLines 80
         }
         health = [ordered]@{
             llm_api = Test-HttpEndpoint -Url "http://localhost:8080/health"
@@ -135,7 +133,7 @@ function Write-DreamInstallReport {
     $jsonPath = Join-Path $artifactsDir "report.json"
     $txtPath = Join-Path $artifactsDir "report.txt"
 
-    $report = New-DreamInstallReport -InstallDir $InstallDir -ComposeFlags $ComposeFlags
+    $report = New-DreamInstallReport -ComposeFlags $ComposeFlags
     ($report | ConvertTo-Json -Depth 8) | Set-Content -Path $jsonPath -Encoding UTF8
 
     $lines = @()
