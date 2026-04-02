@@ -178,7 +178,12 @@ jobs:
           path: /tmp/patch
 
       - name: Apply patch
-        run: git apply /tmp/patch/issue-fix.patch
+        run: |
+          if ! git apply --check /tmp/patch/issue-fix.patch; then
+            echo "::error::Patch cannot be applied cleanly"
+            exit 1
+          fi
+          git apply /tmp/patch/issue-fix.patch
 
       - name: Revert protected files
         id: protect
@@ -214,7 +219,7 @@ jobs:
             exit 0
           fi
 
-          if echo "$DIFF_CONTENT" | grep -iE '(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|ghp_[a-zA-Z0-9]{36}|password\s*=\s*["\x27][^"\x27]+["\x27])' > /dev/null; then
+          if echo "$DIFF_CONTENT" | grep -iE '(sk-[a-zA-Z0-9]{20,}|AKIA[A-Z0-9]{16}|ghp_[a-zA-Z0-9]{36}|gho_[a-zA-Z0-9]{36}|glpat-[a-zA-Z0-9\-]{20,}|-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----|password\s*=\s*["\x27][^"\x27]+["\x27])' > /dev/null; then
             echo "::error::Potential secret detected in changes — aborting"
             git checkout -- .
             exit 1
@@ -336,7 +341,12 @@ jobs:
 
       - name: Apply clean patch
         if: needs.guardrails.outputs.passed == 'true'
-        run: git apply /tmp/clean-patch/issue-fix-clean.patch
+        run: |
+          if ! git apply --check /tmp/clean-patch/issue-fix-clean.patch; then
+            echo "::error::Clean patch cannot be applied"
+            exit 1
+          fi
+          git apply /tmp/clean-patch/issue-fix-clean.patch
 
       - name: Create Draft PR
         id: create
@@ -392,10 +402,13 @@ jobs:
       - name: Determine failure reason
         id: failure
         if: needs.guardrails.outputs.passed != 'true' && needs.validate.outputs.should_proceed == 'true'
+        env:
+          HAS_CHANGES: ${{ needs.implement.outputs.has_changes }}
+          GUARDRAILS_RESULT: ${{ needs.guardrails.result }}
         run: |
-          if [ "${{ needs.implement.outputs.has_changes }}" != "true" ]; then
+          if [ "$HAS_CHANGES" != "true" ]; then
             echo "reason=No code changes were produced. The issue may be too vague, not actionable, or already resolved." >> $GITHUB_OUTPUT
-          elif [ "${{ needs.guardrails.result }}" == "failure" ]; then
+          elif [ "$GUARDRAILS_RESULT" == "failure" ]; then
             echo "reason=Changes were produced but failed guardrail checks (secret scanning, diff size, or syntax validation)." >> $GITHUB_OUTPUT
           else
             echo "reason=Changes were produced but did not survive guardrail checks (protected file reverts removed all changes)." >> $GITHUB_OUTPUT
