@@ -115,10 +115,11 @@ fi
 # 2. Stop and remove systemd user services
 log_info "Removing systemd user services..."
 SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-for unit in opencode-web.service openclaw-session-cleanup.timer openclaw-session-manager.timer \
+for unit in opencode-web.service openclaw-session-cleanup.timer \
             memory-shepherd-workspace.timer memory-shepherd-memory.timer \
-            openclaw-session-cleanup.service openclaw-session-manager.service \
-            memory-shepherd-workspace.service memory-shepherd-memory.service; do
+            openclaw-session-cleanup.service \
+            memory-shepherd-workspace.service memory-shepherd-memory.service \
+            dream-host-agent.service; do
     if [[ -f "$SYSTEMD_USER_DIR/$unit" ]]; then
         systemctl --user disable --now "$unit" 2>/dev/null || true
         rm -f "$SYSTEMD_USER_DIR/$unit"

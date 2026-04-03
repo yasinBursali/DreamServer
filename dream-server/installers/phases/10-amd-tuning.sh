@@ -84,10 +84,10 @@ elif [[ "$GPU_BACKEND" == "amd" ]] && ! $DRY_RUN; then
 
     # Reload and enable all timers
     systemctl --user daemon-reload 2>/dev/null || true
-    for timer in openclaw-session-cleanup openclaw-session-manager memory-shepherd-workspace memory-shepherd-memory; do
+    for timer in openclaw-session-cleanup memory-shepherd-workspace memory-shepherd-memory; do
         systemctl --user enable --now "${timer}.timer" >> "$LOG_FILE" 2>&1 || true
     done
-    ai_ok "Maintenance timers enabled (session cleanup, session manager, memory shepherd)"
+    ai_ok "Maintenance timers enabled (session cleanup, memory shepherd)"
 
     # Enable lingering so user timers survive logout
     loginctl enable-linger "$(whoami)" 2>/dev/null || \
