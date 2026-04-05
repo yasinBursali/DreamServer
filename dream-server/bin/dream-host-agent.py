@@ -251,6 +251,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                  "--format", '{"name":"{{.Name}}","cpu":"{{.CPUPerc}}","mem_usage":"{{.MemUsage}}","mem_percent":"{{.MemPerc}}","pids":"{{.PIDs}}"}'],
                 capture_output=True, text=True, timeout=10,
             )
+            if result.returncode != 0:
+                logger.warning("docker stats returned non-zero: %s", result.stderr[:200] if result.stderr else "")
 
             containers = []
             for line in result.stdout.strip().splitlines():
@@ -283,6 +285,11 @@ class AgentHandler(BaseHTTPRequestHandler):
 
                 service_id = name.removeprefix("dream-")
 
+                try:
+                    pids = int(raw.get("pids", "0") or "0")
+                except (ValueError, TypeError):
+                    pids = 0
+
                 containers.append({
                     "service_id": service_id,
                     "container_name": name,
@@ -290,7 +297,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     "memory_used_mb": round(mem_used_mb),
                     "memory_limit_mb": round(mem_limit_mb),
                     "memory_percent": round(mem_percent, 1),
-                    "pids": int(raw.get("pids", "0") or "0"),
+                    "pids": pids,
                 })
 
             json_response(self, 200, {
@@ -299,6 +306,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             })
         except subprocess.TimeoutExpired:
             json_response(self, 503, {"error": "docker stats timed out"})
+        except Exception as exc:
+            json_response(self, 500, {"error": f"Failed to fetch stats: {exc}"})
 
     def do_POST(self):
         if self.path in ("/v1/extension/start", "/v1/extension/stop"):
