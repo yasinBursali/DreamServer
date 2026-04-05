@@ -102,7 +102,7 @@ if [[ -f "$ENV_FILE" ]]; then
     fi
     # Remove bootstrap reasoning limit (restore default auto)
     if grep -q '^LLAMA_REASONING=' "$ENV_FILE"; then
-        awk '!/^LLAMA_REASONING=/' "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+        awk '!/^LLAMA_REASONING=/' "$ENV_FILE" > "${ENV_FILE}.tmp" && cat "${ENV_FILE}.tmp" > "$ENV_FILE" && rm -f "${ENV_FILE}.tmp"
     fi
     log ".env updated"
 else
@@ -167,6 +167,11 @@ if command -v docker &>/dev/null && docker ps --filter name=dream-llama-server -
         log "WARNING: llama-server health check timed out. The model may still be loading."
         log "Check: docker logs dream-llama-server"
     fi
+elif [[ -f "$INSTALL_DIR/data/.llama-server.pid" ]]; then
+    # macOS native llama-server — print restart notice
+    log "Native llama-server detected (macOS Metal mode)."
+    log "NOTICE: Restart llama-server to load the new model and re-enable reasoning."
+    log "Run: ./dream-macos.sh restart"
 else
     log "Docker services not running. Config updated — full model will load on next start."
 fi
