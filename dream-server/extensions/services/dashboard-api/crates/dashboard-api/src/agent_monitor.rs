@@ -344,6 +344,44 @@ mod tests {
     }
 
     #[test]
+    fn test_get_full_agent_metrics_has_timestamp() {
+        reset_globals();
+        let result = get_full_agent_metrics();
+        assert!(result.get("timestamp").is_some(), "Missing timestamp key");
+        let ts = result["timestamp"].as_str().unwrap();
+        // Should be valid RFC3339
+        assert!(ts.contains('T'), "Timestamp should be RFC3339 format");
+    }
+
+    #[test]
+    fn test_agent_metrics_error_rate_rounding() {
+        reset_globals();
+        *AGENT_METRICS.lock().unwrap() = Some(AgentMetrics {
+            last_update: now_iso(),
+            session_count: 1,
+            tokens_per_second: 0.0,
+            error_rate_1h: 0.123456,
+            queue_depth: 0,
+        });
+        let result = get_full_agent_metrics();
+        // (0.123456 * 100).round() / 100 = 12.0 / 100 = 0.12
+        assert_eq!(result["agent"]["error_rate_1h"], 0.12);
+    }
+
+    #[test]
+    fn test_throughput_empty_data_points() {
+        reset_globals();
+        *THROUGHPUT.lock().unwrap() = Some(ThroughputMetrics {
+            data_points: Vec::new(),
+        });
+        let result = get_full_agent_metrics();
+        assert_eq!(result["throughput"]["current"], 0.0);
+        assert_eq!(result["throughput"]["average"], 0.0);
+        assert_eq!(result["throughput"]["peak"], 0.0);
+        assert!(result["throughput"]["history"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
     fn test_cluster_failover_ready() {
         reset_globals();
 

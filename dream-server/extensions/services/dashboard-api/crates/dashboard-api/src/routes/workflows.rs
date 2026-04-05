@@ -511,6 +511,100 @@ mod tests {
     // GET /api/workflows/n8n/status — with mock n8n
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // GET /api/workflows/{id} — with catalog + template
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_workflow_with_template_returns_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("templates")).unwrap();
+        let template = json!({"id": "doc-qa", "name": "Document Q&A", "nodes": []});
+        std::fs::write(
+            tmp.path().join("templates/doc-qa.json"),
+            serde_json::to_string(&template).unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var("WORKFLOW_DIR", tmp.path().as_os_str());
+        let (status, data) = get_auth("/api/workflows/doc-qa").await;
+        std::env::remove_var("WORKFLOW_DIR");
+
+        assert_eq!(status, http::StatusCode::OK);
+        assert_eq!(data["id"], "doc-qa");
+        assert_eq!(data["name"], "Document Q&A");
+    }
+
+    // -----------------------------------------------------------------------
+    // Auth tests for enable/disable/executions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn enable_workflow_requires_auth() {
+        let app = app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workflows/test-wf/enable")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn disable_workflow_requires_auth() {
+        let app = app();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/workflows/test-wf/disable")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn workflow_executions_requires_auth() {
+        let app = app();
+        let req = Request::builder()
+            .uri("/api/workflows/test-wf/executions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/workflows — with catalog file returns workflows
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_workflows_with_catalog_returns_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let catalog = json!({
+            "workflows": [{"id": "wf1", "name": "Workflow 1"}],
+            "categories": {"auto": "Automation"}
+        });
+        std::fs::write(
+            tmp.path().join("catalog.json"),
+            serde_json::to_string(&catalog).unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var("WORKFLOW_DIR", tmp.path().as_os_str());
+        let (status, data) = get_auth("/api/workflows").await;
+        std::env::remove_var("WORKFLOW_DIR");
+
+        assert_eq!(status, http::StatusCode::OK);
+        let wfs = data["workflows"].as_array().unwrap();
+        assert_eq!(wfs.len(), 1);
+        assert_eq!(wfs[0]["id"], "wf1");
+    }
+
+    // -----------------------------------------------------------------------
+    // GET /api/workflows/n8n/status — with mock n8n
+    // -----------------------------------------------------------------------
+
     #[tokio::test]
     async fn n8n_status_returns_available_with_mock() {
         let mock_server = MockServer::start().await;

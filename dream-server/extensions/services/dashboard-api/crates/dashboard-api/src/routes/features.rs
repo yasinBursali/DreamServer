@@ -199,6 +199,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_features_requires_auth() {
+        let features = vec![json!({"id": "chat", "name": "Chat"})];
+        let app = crate::build_router(test_state_with_features(features));
+        let req = Request::builder()
+            .uri("/api/features")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_features_status_requires_auth() {
+        let features = vec![json!({"id": "chat", "name": "Chat"})];
+        let app = crate::build_router(test_state_with_features(features));
+        let req = Request::builder()
+            .uri("/api/features/status")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_feature_enable_requires_auth() {
+        let features = vec![json!({"id": "chat", "name": "Chat"})];
+        let app = crate::build_router(test_state_with_features(features));
+        let req = Request::builder()
+            .uri("/api/features/chat/enable")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn test_feature_enable_voice_returns_steps() {
+        let features = vec![json!({"id": "voice", "name": "Voice"})];
+        let app = crate::build_router(test_state_with_features(features));
+
+        let req = Request::builder()
+            .uri("/api/features/voice/enable")
+            .header(auth_header().0, auth_header().1)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["featureId"], "voice");
+        let steps = val["instructions"]["steps"].as_array().unwrap();
+        assert!(!steps.is_empty());
+        assert!(steps[0].as_str().unwrap().contains("Whisper"));
+    }
+
+    #[tokio::test]
+    async fn test_feature_enable_workflows_includes_n8n() {
+        let features = vec![json!({"id": "workflows", "name": "Workflows"})];
+        let app = crate::build_router(test_state_with_features(features));
+
+        let req = Request::builder()
+            .uri("/api/features/workflows/enable")
+            .header(auth_header().0, auth_header().1)
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["featureId"], "workflows");
+        let steps = val["instructions"]["steps"].as_array().unwrap();
+        assert!(steps[0].as_str().unwrap().contains("n8n"));
+    }
+
+    #[tokio::test]
     async fn test_feature_enable_unknown_returns_error() {
         let features = vec![json!({"id": "chat", "name": "Chat"})];
         let app = crate::build_router(test_state_with_features(features));

@@ -95,35 +95,112 @@ mod tests {
 
     use crate::state::AppState;
 
-    fn test_state() -> AppState {
+    fn app() -> axum::Router {
         // No privacy-shield service configured => privacy_status returns disabled
-        AppState::new(HashMap::new(), vec![], vec![], "test-key".into())
+        crate::build_router(AppState::new(HashMap::new(), vec![], vec![], "test-key".into()))
     }
 
-    fn auth_header() -> (&'static str, &'static str) {
-        ("Authorization", "Bearer test-key")
+    fn auth_header() -> &'static str {
+        "Bearer test-key"
     }
 
     #[tokio::test]
-    async fn test_privacy_shield_status_returns_json() {
-        let app = crate::build_router(test_state());
-
+    async fn privacy_status_requires_auth() {
         let req = Request::builder()
             .uri("/api/privacy-shield/status")
-            .header(auth_header().0, auth_header().1)
             .body(Body::empty())
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn privacy_status_disabled_when_no_service() {
+        let req = Request::builder()
+            .uri("/api/privacy-shield/status")
+            .header("authorization", auth_header())
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
 
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let val: Value = serde_json::from_slice(&body).unwrap();
 
-        // No privacy-shield service in state => disabled response
         assert_eq!(val["enabled"], false);
         assert_eq!(val["container_running"], false);
         assert_eq!(val["port"], 0);
         assert_eq!(val["pii_cache_enabled"], false);
         assert_eq!(val["message"], "Privacy Shield is not configured");
+    }
+
+    #[tokio::test]
+    async fn privacy_stats_requires_auth() {
+        let req = Request::builder()
+            .uri("/api/privacy-shield/stats")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn privacy_stats_without_service_returns_error() {
+        let req = Request::builder()
+            .uri("/api/privacy-shield/stats")
+            .header("authorization", auth_header())
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("error").is_some(), "Expected error when service not configured");
+    }
+
+    #[tokio::test]
+    async fn privacy_toggle_requires_auth() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/privacy-shield/toggle")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"enable":true}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn privacy_toggle_enable_returns_ok() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/privacy-shield/toggle")
+            .header("authorization", auth_header())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"enable":true}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["status"], "ok");
+        assert_eq!(val["enable"], true);
+    }
+
+    #[tokio::test]
+    async fn privacy_toggle_disable_returns_ok() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/privacy-shield/toggle")
+            .header("authorization", auth_header())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"enable":false}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["status"], "ok");
+        assert_eq!(val["enable"], false);
     }
 }

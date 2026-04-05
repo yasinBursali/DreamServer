@@ -264,4 +264,82 @@ mod tests {
         assert!(val.get("tier").is_some());
         assert!(val.get("services").is_some());
     }
+
+    #[tokio::test]
+    async fn api_status_returns_gpu_key() {
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        // gpu key should exist (null if no GPU hardware)
+        assert!(val.get("gpu").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_status_returns_system_section() {
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("system").is_some());
+        assert!(val["system"].get("hostname").is_some());
+        assert!(val["system"].get("uptime").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_status_returns_inference_section() {
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("inference").is_some());
+        assert!(val["inference"].get("tokensPerSecond").is_some());
+        assert!(val["inference"].get("lifetimeTokens").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_status_returns_resource_metrics() {
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("cpu").is_some());
+        assert!(val.get("ram").is_some());
+        assert!(val.get("disk").is_some());
+        assert!(val.get("uptime").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_status_services_is_array() {
+        let req = Request::builder()
+            .uri("/api/status")
+            .header("authorization", "Bearer test-key")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert!(val["services"].is_array(), "services should be an array");
+    }
 }

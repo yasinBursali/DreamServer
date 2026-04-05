@@ -322,6 +322,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_action_requires_auth() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/update")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"action":"check"}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn releases_manifest_requires_auth() {
+        let req = Request::builder()
+            .uri("/api/releases/manifest")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn releases_manifest_returns_releases_key() {
+        let req = Request::builder()
+            .uri("/api/releases/manifest")
+            .header("authorization", auth_header())
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert!(val.get("releases").is_some());
+        assert!(val["releases"].is_array());
+        assert!(val.get("checked_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn update_action_backup_returns_error_without_cli() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/update")
+            .header("authorization", auth_header())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"action":"backup"}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["action"], "backup");
+        // dream-cli not available in test env => error
+        assert_eq!(val["status"], "error");
+    }
+
+    #[tokio::test]
+    async fn update_action_update_returns_not_supported() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/update")
+            .header("authorization", auth_header())
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"action":"update"}"#))
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let val: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(val["status"], "error");
+        assert_eq!(val["action"], "update");
+    }
+
+    #[tokio::test]
+    async fn dry_run_requires_auth() {
+        let req = Request::builder()
+            .uri("/api/update/dry-run")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 401);
+    }
+
+    #[tokio::test]
     async fn update_action_check_returns_redirect() {
         let req = Request::builder()
             .method("POST")

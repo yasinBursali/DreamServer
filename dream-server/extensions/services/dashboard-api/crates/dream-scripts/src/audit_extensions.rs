@@ -87,6 +87,7 @@ pub fn run(dir: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+// Made visible for unit testing
 fn audit_manifest(path: &Path, ext_name: &str) -> Result<Vec<String>> {
     let text = std::fs::read_to_string(path)?;
     let manifest: serde_json::Value = if path.extension().map_or(false, |e| e == "json") {
@@ -145,4 +146,131 @@ fn audit_manifest(path: &Path, ext_name: &str) -> Result<Vec<String>> {
     }
 
     Ok(warnings)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_audit_manifest_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"
+schema_version: dream.services.v1
+service:
+  id: my-ext
+  name: My Extension
+  port: 8080
+  health: /health
+"#;
+        let path = tmp.path().join("manifest.yaml");
+        fs::write(&path, manifest).unwrap();
+
+        let warnings = audit_manifest(&path, "my-ext").unwrap();
+        assert!(warnings.is_empty(), "Expected no warnings, got: {warnings:?}");
+    }
+
+    #[test]
+    fn test_audit_manifest_missing_schema_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"
+service:
+  id: test
+  name: Test
+"#;
+        let path = tmp.path().join("manifest.yaml");
+        fs::write(&path, manifest).unwrap();
+
+        let err = audit_manifest(&path, "test").unwrap_err();
+        assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn test_audit_manifest_missing_service_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"
+schema_version: dream.services.v1
+service:
+  name: Test
+"#;
+        let path = tmp.path().join("manifest.yaml");
+        fs::write(&path, manifest).unwrap();
+
+        let err = audit_manifest(&path, "test").unwrap_err();
+        assert!(err.to_string().contains("service.id"));
+    }
+
+    #[test]
+    fn test_audit_manifest_id_mismatch_warning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"
+schema_version: dream.services.v1
+service:
+  id: wrong-name
+  name: My Service
+  port: 8080
+  health: /health
+"#;
+        let path = tmp.path().join("manifest.yaml");
+        fs::write(&path, manifest).unwrap();
+
+        let warnings = audit_manifest(&path, "my-ext").unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("does not match")),
+            "Expected id mismatch warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_manifest_missing_optional_fields_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"
+schema_version: dream.services.v1
+service:
+  id: test
+"#;
+        let path = tmp.path().join("manifest.yaml");
+        fs::write(&path, manifest).unwrap();
+
+        let warnings = audit_manifest(&path, "test").unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("name is missing")),
+            "Expected missing name warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_audit_manifest_json_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"{"schema_version": "dream.services.v1", "service": {"id": "test", "name": "Test", "port": 3000, "health": "/health"}}"#;
+        let path = tmp.path().join("manifest.json");
+        fs::write(&path, manifest).unwrap();
+
+        let warnings = audit_manifest(&path, "test").unwrap();
+        assert!(warnings.is_empty(), "Expected no warnings for valid JSON, got: {warnings:?}");
+    }
+
+    #[test]
+    fn test_audit_manifest_feature_missing_id_warns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = r#"
+schema_version: dream.services.v1
+service:
+  id: test
+  name: Test
+  port: 8080
+  health: /health
+features:
+  - name: Chat
+"#;
+        let path = tmp.path().join("manifest.yaml");
+        fs::write(&path, manifest).unwrap();
+
+        let warnings = audit_manifest(&path, "test").unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("features[0].id")),
+            "Expected feature id warning, got: {warnings:?}"
+        );
+    }
 }
