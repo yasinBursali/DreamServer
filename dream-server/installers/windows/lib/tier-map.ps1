@@ -12,11 +12,11 @@
 # ============================================================================
 
 function Normalize-ModelProfile {
-    param([string]$Profile = $env:MODEL_PROFILE)
+    param([string]$ModelProfile = $env:MODEL_PROFILE)
 
-    if (-not $Profile) { return "qwen" }
+    if (-not $ModelProfile) { return "qwen" }
 
-    switch ($Profile.ToLowerInvariant()) {
+    switch ($ModelProfile.ToLowerInvariant()) {
         "auto" { return "auto" }
         "gemma" { return "gemma4" }
         "gemma4" { return "gemma4" }
@@ -372,10 +372,10 @@ function ConvertTo-TierFromGpu {
 function ConvertTo-ModelFromTier {
     param(
         [string]$Tier,
-        [string]$Profile = $env:MODEL_PROFILE
+        [string]$ModelProfile = $env:MODEL_PROFILE
     )
 
-    $requestedProfile = Normalize-ModelProfile -Profile $Profile
+    $requestedProfile = Normalize-ModelProfile -ModelProfile $ModelProfile
     $effectiveProfile = Resolve-EffectiveModelProfile -Tier $Tier -RequestedProfile $requestedProfile
 
     if ($effectiveProfile -eq "gemma4") {
