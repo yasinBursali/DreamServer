@@ -997,42 +997,47 @@ class AgentHandler(BaseHTTPRequestHandler):
                 _recreate_llama_server(env)
 
             # Health check (up to 5 min)
+            # Use container name on docker network (localhost is the agent
+            # container when running containerized, not the llama-server).
             import time
-            health_url = f"http://localhost:{env.get('OLLAMA_PORT', '8080')}"
-            health_url += "/api/v1/health" if gpu_backend == "amd" else "/health"
+            llama_host = "dream-llama-server"
+            # Always use internal container port 8080 (OLLAMA_PORT is the
+            # host-mapped port which isn't reachable from inside the network)
+            llama_port = "8080"
+            health_path = "/api/v1/health" if gpu_backend == "amd" else "/health"
+            health_url = f"http://{llama_host}:{llama_port}{health_path}"
+            logger.info("Waiting for llama-server health at %s", health_url)
             healthy = False
-            for _ in range(60):
+            time.sleep(5)  # Give container time to start
+            for attempt in range(60):
                 try:
                     result = subprocess.run(
-                        ["curl", "-sf", "--max-time", "5", health_url],
-                        capture_output=True, timeout=10,
+                        ["curl", "-s", "--max-time", "5", health_url],
+                        capture_output=True, text=True, timeout=10,
                     )
-                    if result.returncode == 0:
+                    body = result.stdout.strip()
+                    if '"ok"' in body:
                         healthy = True
+                        logger.info("llama-server healthy after %d attempts", attempt + 1)
                         break
+                    if attempt % 6 == 0:
+                        logger.info("Health check attempt %d: %s", attempt + 1, body[:100])
                 except subprocess.TimeoutExpired:
-                    pass
+                    if attempt % 6 == 0:
+                        logger.info("Health check attempt %d: timeout", attempt + 1)
                 time.sleep(5)
 
             if healthy:
+                # Also restart LiteLLM so it picks up the new model name
+                subprocess.run(["docker", "restart", "dream-litellm"],
+                               capture_output=True, timeout=60)
                 json_response(self, 200, {"status": "activated", "model_id": model_id})
             else:
                 # Rollback
                 logger.warning("Model activation failed — rolling back")
                 env_path.write_text(env_backup, encoding="utf-8")
                 models_ini.write_text(ini_backup, encoding="utf-8")
-                if gpu_backend == "amd":
-                    subprocess.run(["docker", "restart", "dream-llama-server"],
-                                   capture_output=True, timeout=300)
-                else:
-                    if compose_flags:
-                        subprocess.run(["docker", "compose"] + compose_flags + ["stop", "llama-server"],
-                                       cwd=str(INSTALL_DIR), capture_output=True, timeout=120)
-                        subprocess.run(["docker", "compose"] + compose_flags + ["up", "-d", "llama-server"],
-                                       cwd=str(INSTALL_DIR), capture_output=True, timeout=300)
-                    else:
-                        subprocess.run(["docker", "stop", "dream-llama-server"], capture_output=True, timeout=120)
-                        subprocess.run(["docker", "start", "dream-llama-server"], capture_output=True, timeout=300)
+                _recreate_llama_server(load_env(env_path))
                 json_response(self, 500, {"error": "Health check failed — rolled back to previous model", "rolled_back": True})
 
         except Exception as exc:
