@@ -22,7 +22,7 @@ from socketserver import ThreadingMixIn
 
 VERSION = "1.0.0"
 SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-MAX_BODY = 4096
+MAX_BODY = 16384
 SUBPROCESS_TIMEOUT_START = 600  # 10 min — image pulls can be slow
 SUBPROCESS_TIMEOUT_STOP = 120   # 2 min — stop should be fast
 logger = logging.getLogger("dream-host-agent")
@@ -67,6 +67,12 @@ def _to_bash_path(path: Path) -> str:
         drive, tail = match.groups()
         return f"/{drive.lower()}/{tail}"
     return normalized
+
+# Model download state — only one download at a time
+_model_download_lock = threading.Lock()
+_model_download_thread: threading.Thread | None = None
+# Model activation lock — prevent concurrent .env writes and Docker restarts
+_model_activate_lock = threading.Lock()
 
 
 def load_env(env_path: Path) -> dict:
@@ -323,6 +329,10 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 200, {"status": "ok", "version": VERSION})
         elif self.path == "/v1/service/stats":
             self._handle_service_stats()
+        elif self.path == "/v1/model/list":
+            self._handle_model_list()
+        elif self.path == "/v1/model/status":
+            self._handle_model_status()
         else:
             json_response(self, 404, {"error": "Not found"})
 
@@ -407,6 +417,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_setup_hook()
         elif self.path == "/v1/service/logs":
             self._handle_service_logs()
+        elif self.path == "/v1/model/download":
+            self._handle_model_download()
+        elif self.path == "/v1/model/activate":
+            self._handle_model_activate()
+        elif self.path == "/v1/model/delete":
+            self._handle_model_delete()
         else:
             json_response(self, 404, {"error": "Not found"})
 
@@ -652,6 +668,656 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         logger.info("setup_hook completed for %s", service_id)
         json_response(self, 200, {"status": "ok", "service_id": service_id})
+
+
+    # ── Model management handlers ──
+
+    def _handle_model_list(self):
+        """Return model library catalog + on-disk GGUFs + active model."""
+        if not check_auth(self):
+            return
+        try:
+            models_dir = INSTALL_DIR / "data" / "models"
+            library_path = INSTALL_DIR / "config" / "model-library.json"
+            env_path = INSTALL_DIR / ".env"
+
+            # Load library
+            library = []
+            if library_path.exists():
+                try:
+                    library = json.loads(library_path.read_text(encoding="utf-8")).get("models", [])
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            # Scan downloaded GGUFs
+            downloaded = {}
+            if models_dir.is_dir():
+                for f in models_dir.iterdir():
+                    if f.is_file() and f.suffix == ".gguf" and not f.name.endswith(".part"):
+                        try:
+                            downloaded[f.name] = f.stat().st_size
+                        except OSError:
+                            pass
+
+            # Active model from .env
+            active_gguf = ""
+            if env_path.exists():
+                env = load_env(env_path)
+                active_gguf = env.get("GGUF_FILE", "")
+
+            json_response(self, 200, {
+                "library": library,
+                "downloaded": downloaded,
+                "active_gguf": active_gguf,
+            })
+        except Exception as exc:
+            json_response(self, 500, {"error": f"Failed to list models: {exc}"})
+
+    def _handle_model_status(self):
+        """Return current model download progress."""
+        if not check_auth(self):
+            return
+        status_path = INSTALL_DIR / "data" / "model-download-status.json"
+        if not status_path.exists():
+            json_response(self, 200, {"status": "idle"})
+            return
+        try:
+            data = json.loads(status_path.read_text(encoding="utf-8"))
+            json_response(self, 200, data)
+        except (json.JSONDecodeError, OSError):
+            json_response(self, 200, {"status": "idle"})
+
+    def _handle_model_download(self):
+        """Start async model download. Only one download at a time.
+
+        Supports both single-file and split-file (gguf_parts) models.
+        For split models, the caller sends gguf_parts as an array of
+        {"file": ..., "url": ...} dicts.  The first part's filename is
+        used as gguf_file for status tracking.
+        """
+        global _model_download_thread
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+
+        gguf_file = body.get("gguf_file", "")
+        gguf_url = body.get("gguf_url", "")
+        gguf_sha256 = body.get("gguf_sha256", "")
+        gguf_parts = body.get("gguf_parts", [])
+
+        if not gguf_file or (not gguf_url and not gguf_parts):
+            json_response(self, 400, {"error": "gguf_file and gguf_url (or gguf_parts) are required"})
+            return
+
+        # Build the download plan: list of (filename, url) tuples
+        if gguf_parts:
+            download_plan = [(p["file"], p["url"]) for p in gguf_parts if p.get("file") and p.get("url")]
+            if not download_plan:
+                json_response(self, 400, {"error": "gguf_parts entries must have file and url"})
+                return
+        else:
+            download_plan = [(gguf_file, gguf_url)]
+
+        # Validate against library (prevent arbitrary URL downloads)
+        library_path = INSTALL_DIR / "config" / "model-library.json"
+        allowed = False
+        if library_path.exists():
+            try:
+                lib = json.loads(library_path.read_text(encoding="utf-8"))
+                for m in lib.get("models", []):
+                    if m.get("gguf_file") != gguf_file:
+                        continue
+                    if gguf_parts:
+                        # Verify every (file, url) in the request matches the library
+                        lib_parts = {(p["file"], p["url"]) for p in m.get("gguf_parts", [])}
+                        req_parts = set(download_plan)
+                        if req_parts and req_parts <= lib_parts:
+                            allowed = True
+                    elif m.get("gguf_url") == gguf_url:
+                        allowed = True
+                    break
+            except (json.JSONDecodeError, OSError):
+                pass
+        if not allowed:
+            json_response(self, 403, {"error": "Model not in library catalog"})
+            return
+
+        models_dir = INSTALL_DIR / "data" / "models"
+        # For split models, check ALL parts exist (not just the first)
+        all_downloaded = all((models_dir / fn).exists() for fn, _ in download_plan)
+        if all_downloaded:
+            json_response(self, 200, {"status": "already_downloaded"})
+            return
+
+        # Check for concurrent download
+        with _model_download_lock:
+            if _model_download_thread is not None and _model_download_thread.is_alive():
+                json_response(self, 409, {"error": "Another download is in progress"})
+                return
+
+            def _download():
+                import time as _time
+                status_path = INSTALL_DIR / "data" / "model-download-status.json"
+                try:
+                    models_dir.mkdir(parents=True, exist_ok=True)
+                    label = gguf_file if len(download_plan) == 1 else f"{gguf_file} ({len(download_plan)} parts)"
+                    _write_model_status(status_path, "downloading", label, 0, 0)
+
+                    for part_idx, (part_file_name, part_url) in enumerate(download_plan, 1):
+                        part_target = models_dir / part_file_name
+                        part_tmp = models_dir / f"{part_file_name}.part"
+                        part_label = part_file_name if len(download_plan) == 1 else f"{part_file_name} (part {part_idx}/{len(download_plan)})"
+
+                        # Get real file size by following redirects and reading final Content-Length
+                        part_total = 0
+                        try:
+                            head_result = subprocess.run(
+                                ["curl", "-sI", "-L", "--connect-timeout", "10", part_url],
+                                capture_output=True, text=True, timeout=30,
+                            )
+                            # Take the LAST content-length header (after all redirects)
+                            for line in head_result.stdout.splitlines():
+                                if line.lower().startswith("content-length:"):
+                                    val = int(line.split(":", 1)[1].strip())
+                                    if val > 10000:  # Ignore redirect page sizes
+                                        part_total = val
+                        except (subprocess.TimeoutExpired, ValueError):
+                            pass
+
+                        _write_model_status(status_path, "downloading", part_label, 0, part_total)
+
+                        # Progress polling: update status by checking .part file size
+                        _stop_progress = threading.Event()
+
+                        def _poll_progress():
+                            while not _stop_progress.is_set():
+                                try:
+                                    if part_tmp.exists():
+                                        current = part_tmp.stat().st_size
+                                        _write_model_status(status_path, "downloading", part_label, current, part_total)
+                                except OSError:
+                                    pass
+                                _stop_progress.wait(2)  # Poll every 2 seconds
+
+                        progress_thread = threading.Thread(target=_poll_progress, daemon=True)
+                        progress_thread.start()
+
+                        # Download with retry
+                        success = False
+                        for attempt in range(1, 4):
+                            if attempt > 1:
+                                logger.info("Model download retry %d/3 for %s", attempt, part_file_name)
+                                _time.sleep(5)
+                            result = subprocess.run(
+                                ["curl", "-fSL", "-C", "-", "--connect-timeout", "30",
+                                 "-o", str(part_tmp), part_url],
+                                capture_output=True, text=True, timeout=14400,
+                            )
+                            if result.returncode == 0:
+                                _stop_progress.set()
+                                part_tmp.rename(part_target)
+                                success = True
+                                break
+                            _write_model_status(status_path, "downloading", part_label, 0, part_total, f"Retry {attempt}/3")
+
+                        _stop_progress.set()
+
+                        if not success:
+                            part_tmp.unlink(missing_ok=True)
+                            _write_model_status(status_path, "failed", part_label, 0, part_total, f"Download failed after 3 attempts")
+                            return
+
+                    # Verify SHA256 if provided (single-file only)
+                    if gguf_sha256 and len(download_plan) == 1:
+                        final_target = models_dir / download_plan[0][0]
+                        final_size = final_target.stat().st_size
+                        _write_model_status(status_path, "verifying", gguf_file, final_size, final_size)
+                        import hashlib
+                        sha = hashlib.sha256()
+                        with open(final_target, "rb") as f:
+                            for chunk in iter(lambda: f.read(1048576), b""):
+                                sha.update(chunk)
+                        actual = sha.hexdigest()
+                        if actual != gguf_sha256:
+                            final_target.unlink(missing_ok=True)
+                            _write_model_status(status_path, "failed", gguf_file, 0, 0, f"SHA256 mismatch: expected {gguf_sha256[:12]}..., got {actual[:12]}...")
+                            return
+
+                    _write_model_status(status_path, "complete", gguf_file, 0, 0)
+                    logger.info("Model download complete: %s (%d parts)", gguf_file, len(download_plan))
+                except Exception as exc:
+                    logger.error("Model download failed: %s", exc)
+                    _write_model_status(status_path, "failed", gguf_file, 0, 0, str(exc))
+
+            _model_download_thread = threading.Thread(target=_download, daemon=True)
+            _model_download_thread.start()
+
+        json_response(self, 200, {"status": "started"})
+
+    def _handle_model_activate(self):
+        """Swap active model: update .env + models.ini + restart llama-server."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+
+        model_id = body.get("model_id", "")
+        if not model_id:
+            json_response(self, 400, {"error": "model_id is required"})
+            return
+
+        if not _model_activate_lock.acquire(blocking=False):
+            json_response(self, 409, {"error": "Another model activation is in progress"})
+            return
+
+        try:
+            self._do_model_activate(model_id)
+        finally:
+            _model_activate_lock.release()
+
+    def _do_model_activate(self, model_id: str):
+        """Inner activate logic — called with _model_activate_lock held."""
+        # Look up model in library
+        library_path = INSTALL_DIR / "config" / "model-library.json"
+        model = None
+        if library_path.exists():
+            try:
+                lib = json.loads(library_path.read_text(encoding="utf-8"))
+                for m in lib.get("models", []):
+                    if m.get("id") == model_id:
+                        model = m
+                        break
+            except (json.JSONDecodeError, OSError):
+                pass
+        if model is None:
+            json_response(self, 404, {"error": f"Model '{model_id}' not found in library"})
+            return
+
+        gguf_file = model.get("gguf_file", "")
+        llm_model_name = model.get("llm_model_name", model_id)
+        context_length = model.get("context_length", 32768)
+
+        # Verify GGUF exists on disk
+        target = INSTALL_DIR / "data" / "models" / gguf_file
+        if not target.exists():
+            json_response(self, 400, {"error": f"Model file not downloaded: {gguf_file}"})
+            return
+
+        env_path = INSTALL_DIR / ".env"
+        models_ini = INSTALL_DIR / "config" / "llama-server" / "models.ini"
+
+        try:
+            # Save rollback snapshot
+            env_backup = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+            ini_backup = models_ini.read_text(encoding="utf-8") if models_ini.exists() else ""
+
+            # Update .env
+            if env_path.exists():
+                lines = env_path.read_text(encoding="utf-8").splitlines()
+                updates = {
+                    "GGUF_FILE": gguf_file,
+                    "LLM_MODEL": llm_model_name,
+                    "CTX_SIZE": str(context_length),
+                    "MAX_CONTEXT": str(context_length),
+                }
+                # Update server image if the model requires a specific build
+                # (e.g., Gemma 4 needs server-cuda-b8648 instead of b8248)
+                if model.get("llama_server_image"):
+                    updates["LLAMA_SERVER_IMAGE"] = model["llama_server_image"]
+                new_lines = []
+                seen = set()
+                for line in lines:
+                    key = line.split("=", 1)[0] if "=" in line and not line.startswith("#") else None
+                    if key and key in updates:
+                        new_lines.append(f"{key}={updates[key]}")
+                        seen.add(key)
+                    else:
+                        new_lines.append(line)
+                for key, val in updates.items():
+                    if key not in seen:
+                        new_lines.append(f"{key}={val}")
+                env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+            # Update models.ini
+            models_ini.parent.mkdir(parents=True, exist_ok=True)
+            models_ini.write_text(
+                f"[{llm_model_name}]\n"
+                f"filename = {gguf_file}\n"
+                f"load-on-startup = true\n"
+                f"n-ctx = {context_length}\n",
+                encoding="utf-8",
+            )
+
+            # Restart llama-server with the new model.
+            # Two strategies depending on where the agent runs:
+            # - Host-native (Linux/macOS): docker compose stop+up, same as
+            #   bootstrap-upgrade.sh. Simple, correct, preserves all config.
+            # - Containerized (Docker Desktop WSL2): docker inspect+run.
+            #   Compose can't be used because relative bind-mount paths
+            #   resolve to the agent container's filesystem, not the host.
+            env = load_env(env_path)
+            gpu_backend = env.get("GPU_BACKEND", "nvidia")
+            _in_container = bool(os.environ.get("DREAM_HOST_INSTALL_DIR"))
+
+            if _in_container:
+                override_image = model.get("llama_server_image") or ""
+                _recreate_llama_server(env, override_image=override_image)
+            else:
+                _compose_restart_llama_server(env)
+
+            # Health check (up to 5 min)
+            # Use container name on docker network (localhost is the agent
+            # container when running containerized, not the llama-server).
+            import time
+            # Determine health check URL based on where the agent runs:
+            # - Inside a container (DREAM_HOST_INSTALL_DIR set): use docker
+            #   network name + internal port 8080
+            # - On the host (native systemd): use localhost + OLLAMA_PORT
+            if os.environ.get("DREAM_HOST_INSTALL_DIR"):
+                llama_host = "dream-llama-server"
+                llama_port = "8080"
+            else:
+                llama_host = "localhost"
+                llama_port = env.get("OLLAMA_PORT", "8080")
+            health_path = "/api/v1/health" if gpu_backend == "amd" else "/health"
+            health_url = f"http://{llama_host}:{llama_port}{health_path}"
+            logger.info("Waiting for llama-server health at %s", health_url)
+            healthy = False
+            time.sleep(5)  # Give container time to start
+            for attempt in range(60):
+                try:
+                    result = subprocess.run(
+                        ["curl", "-s", "--max-time", "5", health_url],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    body = result.stdout.strip()
+                    if '"ok"' in body:
+                        healthy = True
+                        logger.info("llama-server healthy after %d attempts", attempt + 1)
+                        break
+                    if attempt % 6 == 0:
+                        logger.info("Health check attempt %d: %s", attempt + 1, body[:100])
+                except subprocess.TimeoutExpired:
+                    if attempt % 6 == 0:
+                        logger.info("Health check attempt %d: timeout", attempt + 1)
+                time.sleep(5)
+
+            if healthy:
+                # Restart dependent services so they pick up the new model
+                for svc in ["dream-litellm", "dream-dreamforge"]:
+                    subprocess.run(["docker", "restart", svc],
+                                   capture_output=True, timeout=60)
+                json_response(self, 200, {"status": "activated", "model_id": model_id})
+            else:
+                # Rollback
+                logger.warning("Model activation failed — rolling back")
+                env_path.write_text(env_backup, encoding="utf-8")
+                models_ini.write_text(ini_backup, encoding="utf-8")
+                rollback_env = load_env(env_path)
+                if _in_container:
+                    _recreate_llama_server(rollback_env)
+                else:
+                    _compose_restart_llama_server(rollback_env)
+                json_response(self, 500, {"error": "Health check failed — rolled back to previous model", "rolled_back": True})
+
+        except Exception as exc:
+            json_response(self, 500, {"error": f"Model activation failed: {exc}"})
+
+    def _handle_model_delete(self):
+        """Delete a downloaded GGUF model file."""
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+
+        gguf_file = body.get("gguf_file", "")
+        if not gguf_file:
+            json_response(self, 400, {"error": "gguf_file is required"})
+            return
+
+        models_dir = INSTALL_DIR / "data" / "models"
+        target = (models_dir / gguf_file).resolve()
+
+        # Path traversal prevention
+        if not target.is_relative_to(models_dir.resolve()):
+            json_response(self, 400, {"error": "Invalid file path"})
+            return
+
+        if not target.exists():
+            json_response(self, 404, {"error": f"File not found: {gguf_file}"})
+            return
+
+        # Refuse to delete the active model
+        env = load_env(INSTALL_DIR / ".env")
+        if env.get("GGUF_FILE", "") == gguf_file:
+            json_response(self, 409, {"error": "Cannot delete the currently active model"})
+            return
+
+        try:
+            # For split models, delete all part files
+            library_path = INSTALL_DIR / "config" / "model-library.json"
+            parts_to_delete = [target]
+            if library_path.exists():
+                try:
+                    lib = json.loads(library_path.read_text(encoding="utf-8"))
+                    for m in lib.get("models", []):
+                        if m.get("gguf_file") == gguf_file and m.get("gguf_parts"):
+                            parts_to_delete = []
+                            for p in m["gguf_parts"]:
+                                pf = (models_dir / p["file"]).resolve()
+                                if pf.is_relative_to(models_dir.resolve()) and pf.exists():
+                                    parts_to_delete.append(pf)
+                            break
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+            for pf in parts_to_delete:
+                pf.unlink()
+            json_response(self, 200, {"status": "deleted", "gguf_file": gguf_file})
+        except OSError as exc:
+            json_response(self, 500, {"error": f"Failed to delete: {exc}"})
+
+
+def _compose_restart_llama_server(env: dict):
+    """Restart llama-server via docker compose (host-native path).
+
+    This is the primary restart strategy for Linux (systemd) and macOS
+    (launchd) where the agent runs natively on the host.  It mirrors the
+    proven pattern from bootstrap-upgrade.sh lines 289-304.
+    """
+    gpu_backend = env.get("GPU_BACKEND", "nvidia")
+    compose_flags = []
+    flags_file = INSTALL_DIR / ".compose-flags"
+    if flags_file.exists():
+        compose_flags = flags_file.read_text(encoding="utf-8").strip().split()
+
+    if gpu_backend == "amd":
+        # Lemonade: restart preserves cached binary, reads models.ini on boot
+        if compose_flags:
+            subprocess.run(["docker", "compose"] + compose_flags + ["restart", "llama-server"],
+                           cwd=str(INSTALL_DIR), capture_output=True, timeout=300)
+        else:
+            subprocess.run(["docker", "restart", "dream-llama-server"],
+                           capture_output=True, timeout=300)
+    else:
+        # llama.cpp: recreate to pick up new GGUF_FILE from .env
+        if compose_flags:
+            subprocess.run(["docker", "compose"] + compose_flags + ["stop", "llama-server"],
+                           cwd=str(INSTALL_DIR), capture_output=True, timeout=120)
+            subprocess.run(["docker", "compose"] + compose_flags + ["up", "-d", "llama-server"],
+                           cwd=str(INSTALL_DIR), capture_output=True, timeout=300)
+        else:
+            subprocess.run(["docker", "stop", "dream-llama-server"],
+                           capture_output=True, timeout=120)
+            subprocess.run(["docker", "start", "dream-llama-server"],
+                           capture_output=True, timeout=300)
+
+    logger.info("llama-server restarted via compose (backend: %s)", gpu_backend)
+
+
+def _recreate_llama_server(env: dict, override_image: str = ""):
+    """Recreate llama-server container with updated model from .env.
+
+    Instead of docker compose (which breaks relative volume mounts when
+    run from inside a container), we inspect the existing container and
+    create a new one with the same config but updated --model and --ctx-size.
+
+    If override_image is set, use that image instead of the existing one
+    (e.g., Gemma 4 models need a different llama.cpp build).
+    """
+    container = "dream-llama-server"
+    gguf_file = env.get("GGUF_FILE", "")
+    ctx_size = env.get("CTX_SIZE", "32768")
+
+    # Get existing container config for image, mounts, env, ports, etc.
+    result = subprocess.run(
+        ["docker", "inspect", container],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        logger.error("Failed to inspect %s: %s", container, result.stderr)
+        return
+
+    import copy
+    config = json.loads(result.stdout)[0]
+
+    # Build new command: replace --model and --ctx-size values
+    old_cmd = config["Config"]["Cmd"] or []
+    new_cmd = []
+    skip_next = False
+    for i, arg in enumerate(old_cmd):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--model" and i + 1 < len(old_cmd):
+            new_cmd.append("--model")
+            new_cmd.append(f"/models/{gguf_file}")
+            skip_next = True
+        elif arg == "--ctx-size" and i + 1 < len(old_cmd):
+            new_cmd.append("--ctx-size")
+            new_cmd.append(ctx_size)
+            skip_next = True
+        else:
+            new_cmd.append(arg)
+
+    image = override_image or config["Config"]["Image"]
+    host_config = config["HostConfig"]
+
+    # Stop and remove old container
+    subprocess.run(["docker", "stop", container], capture_output=True, timeout=120)
+    subprocess.run(["docker", "rm", container], capture_output=True, timeout=30)
+
+    # Build docker run command from inspected config
+    run_cmd = ["docker", "run", "-d", "--name", container]
+
+    # Restart policy
+    restart = host_config.get("RestartPolicy", {})
+    if restart.get("Name"):
+        run_cmd += ["--restart", restart["Name"]]
+
+    # Network + aliases (compose sets service name as alias, e.g. "llama-server")
+    # Other containers (LiteLLM, Open WebUI) reference "llama-server" by
+    # the compose service name, so we must preserve it as a network alias.
+    networks = config.get("NetworkSettings", {}).get("Networks", {})
+    for net_name, net_cfg in networks.items():
+        run_cmd += ["--network", net_name]
+        # Restore aliases from the compose config
+        for alias in (net_cfg.get("Aliases") or []):
+            if alias != container and alias != config["Config"].get("Hostname", ""):
+                run_cmd += ["--network-alias", alias]
+        # Always ensure the compose service name is an alias
+        run_cmd += ["--network-alias", "llama-server"]
+        break  # Use the first network
+
+    # Ports
+    port_bindings = host_config.get("PortBindings") or {}
+    for container_port, bindings in port_bindings.items():
+        if bindings:
+            for b in bindings:
+                host_ip = b.get("HostIp", "")
+                host_port = b.get("HostPort", "")
+                if host_ip:
+                    run_cmd += ["-p", f"{host_ip}:{host_port}:{container_port}"]
+                else:
+                    run_cmd += ["-p", f"{host_port}:{container_port}"]
+
+    # Volumes/Bind mounts
+    for mount in config.get("Mounts", []):
+        src = mount.get("Source", "")
+        dst = mount.get("Destination", "")
+        mode = "ro" if mount.get("RW") is False else "rw"
+        if src and dst:
+            run_cmd += ["-v", f"{src}:{dst}:{mode}"]
+
+    # Environment variables
+    for e in (config["Config"].get("Env") or []):
+        run_cmd += ["-e", e]
+
+    # Extra hosts
+    for eh in (host_config.get("ExtraHosts") or []):
+        run_cmd += ["--add-host", eh]
+
+    # GPU (device requests)
+    for dr in (host_config.get("DeviceRequests") or []):
+        if dr.get("Driver") == "" or "gpu" in (dr.get("Capabilities") or [[]])[0]:
+            count = dr.get("Count", 0)
+            device_ids = dr.get("DeviceIDs") or []
+            if device_ids:
+                run_cmd += ["--gpus", f'device={",".join(device_ids)}']
+            elif count == -1:
+                run_cmd += ["--gpus", "all"]
+            else:
+                run_cmd += ["--gpus", str(count)]
+
+    # Security options
+    for so in (host_config.get("SecurityOpt") or []):
+        run_cmd += ["--security-opt", so]
+
+    # Logging
+    log_config = host_config.get("LogConfig", {})
+    if log_config.get("Type"):
+        run_cmd += ["--log-driver", log_config["Type"]]
+        for k, v in (log_config.get("Config") or {}).items():
+            run_cmd += ["--log-opt", f"{k}={v}"]
+
+    # Entrypoint (AMD Lemonade overrides this in compose)
+    entrypoint = config["Config"].get("Entrypoint")
+    if entrypoint:
+        run_cmd += ["--entrypoint", entrypoint[0]]
+
+    # Image and command
+    run_cmd.append(image)
+    run_cmd.extend(new_cmd)
+
+    logger.info("Recreating llama-server: %s with model %s", image, gguf_file)
+    result = subprocess.run(run_cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        logger.error("Failed to create llama-server: %s", result.stderr)
+    else:
+        logger.info("llama-server container created successfully")
+
+
+def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = ""):
+    """Write model download status JSON atomically."""
+    data = {
+        "status": status,
+        "model": model,
+        "bytesDownloaded": downloaded,
+        "bytesTotal": total,
+        "updatedAt": _iso_now(),
+    }
+    if error:
+        data["error"] = error
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.rename(path)
+    except OSError:
+        pass
 
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
