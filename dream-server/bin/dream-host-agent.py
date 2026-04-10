@@ -980,38 +980,21 @@ class AgentHandler(BaseHTTPRequestHandler):
                 encoding="utf-8",
             )
 
-            # Restart llama-server
+            # Restart llama-server by recreating the container directly.
+            # We avoid `docker compose up -d` because when the agent runs
+            # inside a container, compose resolves relative bind-mount paths
+            # (./data/models) to the agent container's filesystem, not the
+            # host. Instead, we inspect the old container's config, update
+            # the command args with the new model, and create a fresh one.
             env = load_env(env_path)
             gpu_backend = env.get("GPU_BACKEND", "nvidia")
 
-            compose_flags = []
-            flags_file = INSTALL_DIR / ".compose-flags"
-            if flags_file.exists():
-                compose_flags = flags_file.read_text(encoding="utf-8").strip().split()
-
-            # When the agent runs inside a container, relative paths in
-            # docker-compose resolve to the container's mount, not the
-            # host filesystem. DREAM_HOST_INSTALL_DIR tells compose the
-            # real host path so volume mounts resolve correctly.
-            host_install_dir = os.environ.get("DREAM_HOST_INSTALL_DIR", str(INSTALL_DIR))
-            compose_env = {**os.environ, "PWD": host_install_dir}
-
             if gpu_backend == "amd":
-                if compose_flags:
-                    subprocess.run(["docker", "compose", "--project-directory", host_install_dir] + compose_flags + ["restart", "llama-server"],
-                                   cwd=host_install_dir, env=compose_env, capture_output=True, timeout=300)
-                else:
-                    subprocess.run(["docker", "restart", "dream-llama-server"],
-                                   capture_output=True, timeout=300)
+                # AMD uses `restart` which preserves the container (no path issue)
+                subprocess.run(["docker", "restart", "dream-llama-server"],
+                               capture_output=True, timeout=300)
             else:
-                if compose_flags:
-                    subprocess.run(["docker", "compose", "--project-directory", host_install_dir] + compose_flags + ["stop", "llama-server"],
-                                   cwd=host_install_dir, env=compose_env, capture_output=True, timeout=120)
-                    subprocess.run(["docker", "compose", "--project-directory", host_install_dir] + compose_flags + ["up", "-d", "llama-server"],
-                                   cwd=host_install_dir, env=compose_env, capture_output=True, timeout=300)
-                else:
-                    subprocess.run(["docker", "stop", "dream-llama-server"], capture_output=True, timeout=120)
-                    subprocess.run(["docker", "start", "dream-llama-server"], capture_output=True, timeout=300)
+                _recreate_llama_server(env)
 
             # Health check (up to 5 min)
             import time
@@ -1091,6 +1074,132 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 200, {"status": "deleted", "gguf_file": gguf_file})
         except OSError as exc:
             json_response(self, 500, {"error": f"Failed to delete: {exc}"})
+
+
+def _recreate_llama_server(env: dict):
+    """Recreate llama-server container with updated model from .env.
+
+    Instead of docker compose (which breaks relative volume mounts when
+    run from inside a container), we inspect the existing container and
+    create a new one with the same config but updated --model and --ctx-size.
+    """
+    container = "dream-llama-server"
+    gguf_file = env.get("GGUF_FILE", "")
+    ctx_size = env.get("CTX_SIZE", "32768")
+
+    # Get existing container config for image, mounts, env, ports, etc.
+    result = subprocess.run(
+        ["docker", "inspect", container],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        logger.error("Failed to inspect %s: %s", container, result.stderr)
+        return
+
+    import copy
+    config = json.loads(result.stdout)[0]
+
+    # Build new command: replace --model and --ctx-size values
+    old_cmd = config["Config"]["Cmd"] or []
+    new_cmd = []
+    skip_next = False
+    for i, arg in enumerate(old_cmd):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--model" and i + 1 < len(old_cmd):
+            new_cmd.append("--model")
+            new_cmd.append(f"/models/{gguf_file}")
+            skip_next = True
+        elif arg == "--ctx-size" and i + 1 < len(old_cmd):
+            new_cmd.append("--ctx-size")
+            new_cmd.append(ctx_size)
+            skip_next = True
+        else:
+            new_cmd.append(arg)
+
+    image = config["Config"]["Image"]
+    host_config = config["HostConfig"]
+
+    # Stop and remove old container
+    subprocess.run(["docker", "stop", container], capture_output=True, timeout=120)
+    subprocess.run(["docker", "rm", container], capture_output=True, timeout=30)
+
+    # Build docker run command from inspected config
+    run_cmd = ["docker", "run", "-d", "--name", container]
+
+    # Restart policy
+    restart = host_config.get("RestartPolicy", {})
+    if restart.get("Name"):
+        run_cmd += ["--restart", restart["Name"]]
+
+    # Network
+    networks = config.get("NetworkSettings", {}).get("Networks", {})
+    for net_name in networks:
+        run_cmd += ["--network", net_name]
+        break  # Use the first network
+
+    # Ports
+    port_bindings = host_config.get("PortBindings") or {}
+    for container_port, bindings in port_bindings.items():
+        if bindings:
+            for b in bindings:
+                host_ip = b.get("HostIp", "")
+                host_port = b.get("HostPort", "")
+                if host_ip:
+                    run_cmd += ["-p", f"{host_ip}:{host_port}:{container_port}"]
+                else:
+                    run_cmd += ["-p", f"{host_port}:{container_port}"]
+
+    # Volumes/Bind mounts
+    for mount in config.get("Mounts", []):
+        src = mount.get("Source", "")
+        dst = mount.get("Destination", "")
+        mode = "ro" if mount.get("RW") is False else "rw"
+        if src and dst:
+            run_cmd += ["-v", f"{src}:{dst}:{mode}"]
+
+    # Environment variables
+    for e in (config["Config"].get("Env") or []):
+        run_cmd += ["-e", e]
+
+    # Extra hosts
+    for eh in (host_config.get("ExtraHosts") or []):
+        run_cmd += ["--add-host", eh]
+
+    # GPU (device requests)
+    for dr in (host_config.get("DeviceRequests") or []):
+        if dr.get("Driver") == "" or "gpu" in (dr.get("Capabilities") or [[]])[0]:
+            count = dr.get("Count", 0)
+            device_ids = dr.get("DeviceIDs") or []
+            if device_ids:
+                run_cmd += ["--gpus", f'"device={",".join(device_ids)}"']
+            elif count == -1:
+                run_cmd += ["--gpus", "all"]
+            else:
+                run_cmd += ["--gpus", str(count)]
+
+    # Security options
+    for so in (host_config.get("SecurityOpt") or []):
+        run_cmd += ["--security-opt", so]
+
+    # Logging
+    log_config = host_config.get("LogConfig", {})
+    if log_config.get("Type"):
+        run_cmd += ["--log-driver", log_config["Type"]]
+        for k, v in (log_config.get("Config") or {}).items():
+            run_cmd += ["--log-opt", f"{k}={v}"]
+
+    # Image and command
+    run_cmd.append(image)
+    run_cmd.extend(new_cmd)
+
+    logger.info("Recreating llama-server: %s with model %s", image, gguf_file)
+    result = subprocess.run(run_cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        logger.error("Failed to create llama-server: %s", result.stderr)
+    else:
+        logger.info("llama-server container created successfully")
 
 
 def _write_model_status(path: Path, status: str, model: str, downloaded: int, total: int, error: str = ""):
