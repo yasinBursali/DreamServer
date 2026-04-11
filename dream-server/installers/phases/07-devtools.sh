@@ -217,6 +217,17 @@ if [[ -f "$INSTALL_DIR/bin/dream-host-agent.py" ]]; then
             systemctl --user enable --now dream-host-agent.service >> "$LOG_FILE" 2>&1 && \
                 ai_ok "Dream host agent installed (systemd --user, port 7710)" || \
                 ai_warn "Dream host agent service failed to start — run: dream agent start"
+            # Force-restart so the running process matches the binary the installer
+            # just rewrote. enable --now is a no-op when the unit was already active,
+            # which would leave an old daemon holding a deleted inode and serving
+            # stale code after a reinstall. See issue #334. Use is-enabled (not
+            # is-active) so a temporarily-down daemon during a fresh install still
+            # triggers the restart rather than skipping it.
+            if systemctl --user is-enabled dream-host-agent.service >/dev/null 2>&1; then
+                systemctl --user restart dream-host-agent.service >> "$LOG_FILE" 2>&1 && \
+                    ai_ok "Dream host agent restarted (loaded new binary)" || \
+                    ai_warn "Dream host agent restart failed (non-fatal) — run: systemctl --user restart dream-host-agent.service"
+            fi
             loginctl enable-linger "$(whoami)" 2>/dev/null || \
                 sudo -n loginctl enable-linger "$(whoami)" 2>/dev/null || true
         else
