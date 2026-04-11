@@ -153,8 +153,23 @@ OPENCODE_EOF
             ai_ok "OpenCode configured for local llama-server (model: ${LLM_MODEL})"
         else
             # Reinstall: update API key and URL in existing config (key may have changed)
-            _sed_i "s|\"apiKey\":.*|\"apiKey\": \"${_opencode_key}\"|" "$OPENCODE_CONFIG_DIR/opencode.json"
-            _sed_i "s|\"baseURL\":.*|\"baseURL\": \"${_opencode_url}\"|" "$OPENCODE_CONFIG_DIR/opencode.json"
+            if command -v jq >/dev/null 2>&1; then
+                _opencode_tmp="$OPENCODE_CONFIG_DIR/opencode.json.tmp.$$"
+                if jq --arg url "$_opencode_url" --arg key "$_opencode_key" \
+                    '.provider["llama-server"].options.baseURL = $url
+                     | .provider["llama-server"].options.apiKey = $key' \
+                    "$OPENCODE_CONFIG_DIR/opencode.json" > "$_opencode_tmp"; then
+                    mv "$_opencode_tmp" "$OPENCODE_CONFIG_DIR/opencode.json"
+                else
+                    rm -f "$_opencode_tmp"
+                    ai_warn "OpenCode config jq rewrite failed; leaving existing config in place"
+                fi
+            else
+                # Fallback without jq: narrow sed that only matches the quoted value,
+                # preserving any trailing comma on the line
+                _sed_i "s|\"apiKey\": *\"[^\"]*\"|\"apiKey\": \"${_opencode_key}\"|" "$OPENCODE_CONFIG_DIR/opencode.json"
+                _sed_i "s|\"baseURL\": *\"[^\"]*\"|\"baseURL\": \"${_opencode_url}\"|" "$OPENCODE_CONFIG_DIR/opencode.json"
+            fi
             ai_ok "OpenCode config updated (API key and URL refreshed)"
         fi
         # OpenCode reads config.json, not opencode.json — always sync
