@@ -12,7 +12,7 @@ services:
       dockerfile: Dockerfile.amd
       args:
         AMDGPU_TARGET: ${AMDGPU_TARGET:-gfx1151}
-        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-master}
+        LLAMA_CPP_REF: ${LLAMA_CPP_REF:-b8763}
     image: dream-lemonade-server:latest
     entrypoint: ["/opt/lemonade/lemonade-server"]
     command:
