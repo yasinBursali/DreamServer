@@ -272,7 +272,20 @@ if command -v docker &>/dev/null && docker ps --filter name=dream-llama-server -
         case "${_gpu_backend}" in
             nvidia) [[ -f "$INSTALL_DIR/docker-compose.nvidia.yml" ]] && COMPOSE_ARGS+=(-f "$INSTALL_DIR/docker-compose.nvidia.yml") ;;
             amd)    [[ -f "$INSTALL_DIR/docker-compose.amd.yml" ]]    && COMPOSE_ARGS+=(-f "$INSTALL_DIR/docker-compose.amd.yml") ;;
-            apple)  [[ -f "$INSTALL_DIR/docker-compose.apple.yml" ]]  && COMPOSE_ARGS+=(-f "$INSTALL_DIR/docker-compose.apple.yml") ;;
+            apple)
+                # On Darwin hosts the canonical macOS overlay lives at
+                # installers/macos/docker-compose.macos.yml (native Metal llama-server
+                # replicas: 0, llama-server-ready sidecar, host.docker.internal for
+                # dashboard-api). The top-level docker-compose.apple.yml remains
+                # valid for Linux hosts that select --gpu-backend apple (Lemonade).
+                # Mirror the branch in scripts/resolve-compose-stack.sh so that the
+                # .compose-flags fallback selects the same overlay the resolver does.
+                if [[ "$(uname -s)" == "Darwin" && -f "$INSTALL_DIR/installers/macos/docker-compose.macos.yml" ]]; then
+                    COMPOSE_ARGS+=(-f "$INSTALL_DIR/installers/macos/docker-compose.macos.yml")
+                elif [[ -f "$INSTALL_DIR/docker-compose.apple.yml" ]]; then
+                    COMPOSE_ARGS+=(-f "$INSTALL_DIR/docker-compose.apple.yml")
+                fi
+                ;;
             # cpu or unknown: base only, no GPU overlay
         esac
     fi
