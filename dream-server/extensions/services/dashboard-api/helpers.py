@@ -397,10 +397,27 @@ def get_bootstrap_status() -> BootstrapStatus:
             data = json.load(f)
 
         status = data.get("status", "")
-        if status == "complete":
+        if status in ("complete", "failed", "cancelled", "error"):
             return BootstrapStatus(active=False)
         if status == "" and not data.get("bytesDownloaded") and not data.get("percent"):
             return BootstrapStatus(active=False)
+
+        # Reconcile with the filesystem: if the target model file is already
+        # present on disk, the download is effectively done regardless of what
+        # the status record says (covers stale "downloading" entries left by a
+        # crash or a parallel download path). Skip during "verifying" because
+        # the file has been renamed into place but SHA256 hasn't finished yet —
+        # returning inactive here would hide a subsequent verification failure.
+        model_name = data.get("model")
+        if model_name and status != "verifying":
+            models_dir = Path(DATA_DIR) / "models"
+            model_path = (models_dir / model_name).resolve()
+            if model_path.is_relative_to(models_dir.resolve()):
+                try:
+                    if model_path.exists() and model_path.stat().st_size > 0:
+                        return BootstrapStatus(active=False)
+                except OSError as e:
+                    logger.debug("bootstrap reconciliation stat failed: %s", e)
 
         eta_str = data.get("eta", "")
         eta_seconds = None
