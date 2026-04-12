@@ -68,19 +68,11 @@ esac
 # ── Check prerequisites ──────────────────────────────
 log "Checking prerequisites..."
 
-# Docker check (early fail fast)
+# Docker check (informational — the installer auto-installs Docker if missing)
 if command -v docker &> /dev/null; then
     success "Docker found: $(docker --version | head -1)"
-    if docker info &> /dev/null; then
-        success "Docker daemon running"
-    else
-        warn "Docker installed but daemon not running"
-        echo "  Start with: sudo systemctl start docker"
-        echo "  Or on macOS: open Docker Desktop"
-    fi
 else
-    warn "Docker not found — will attempt auto-install"
-    echo "  Note: This requires sudo access and may take several minutes"
+    warn "Docker not found — the installer will attempt to install it"
 fi
 
 # GPU check (early info — real detection happens in the installer)
@@ -149,18 +141,16 @@ else
     success "curl installed"
 fi
 
-# docker
+# docker (the installer auto-installs Docker if missing — don't block here)
 if command -v docker &> /dev/null; then
     success "docker found: $(docker --version | head -1)"
+    if docker compose version &> /dev/null || docker-compose --version &> /dev/null; then
+        success "docker compose found"
+    else
+        warn "Docker Compose not found — the installer will attempt to set it up"
+    fi
 else
-    error "Docker is required but not installed.\n\nInstall Docker:\n  Ubuntu/WSL: https://docs.docker.com/engine/install/ubuntu/\n  Other:      https://docs.docker.com/get-docker/\n\nAfter installing, re-run this script."
-fi
-
-# docker compose (plugin or standalone)
-if docker compose version &> /dev/null || docker-compose --version &> /dev/null; then
-    success "docker compose found"
-else
-    error "Docker Compose is required but not found.\n\nInstall Docker Compose:\n  https://docs.docker.com/compose/install/\n\nAfter installing, re-run this script."
+    warn "Docker not found — the installer will attempt to install it"
 fi
 
 # GPU pre-check already done above — real detection happens in the installer
