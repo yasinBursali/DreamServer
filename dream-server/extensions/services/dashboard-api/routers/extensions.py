@@ -274,12 +274,13 @@ def _scan_compose_content(
     if not isinstance(services, dict):
         return
 
-    for svc_name in services:
-        if not skip_name_collision and svc_name in CORE_SERVICE_IDS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Extension rejected: service name '{svc_name}' conflicts with core service",
-            )
+    if not skip_name_collision:
+        for svc_name in services:
+            if svc_name in CORE_SERVICE_IDS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Extension rejected: service name '{svc_name}' conflicts with core service",
+                )
 
     for svc_name, svc_def in services.items():
         if not isinstance(svc_def, dict):
