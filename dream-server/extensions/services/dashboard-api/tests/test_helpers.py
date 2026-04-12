@@ -142,6 +142,51 @@ class TestGetBootstrapStatus:
         status = get_bootstrap_status()
         assert status.active is False
 
+    def test_inactive_when_failed(self, data_dir):
+        status_file = data_dir / "bootstrap-status.json"
+        status_file.write_text(json.dumps({"status": "failed", "model": "test.gguf"}))
+
+        status = get_bootstrap_status()
+        assert status.active is False
+
+    def test_inactive_when_model_file_on_disk(self, data_dir):
+        models_dir = data_dir / "models"
+        models_dir.mkdir(exist_ok=True)
+        (models_dir / "present.gguf").write_bytes(b"\x00" * 1024)
+
+        status_file = data_dir / "bootstrap-status.json"
+        status_file.write_text(json.dumps({
+            "status": "downloading", "model": "present.gguf",
+            "percent": 50, "bytesDownloaded": 500, "bytesTotal": 1024,
+        }))
+
+        status = get_bootstrap_status()
+        assert status.active is False
+
+    def test_active_during_verifying_even_if_file_exists(self, data_dir):
+        models_dir = data_dir / "models"
+        models_dir.mkdir(exist_ok=True)
+        (models_dir / "verifying.gguf").write_bytes(b"\x00" * 1024)
+
+        status_file = data_dir / "bootstrap-status.json"
+        status_file.write_text(json.dumps({
+            "status": "verifying", "model": "verifying.gguf",
+            "percent": 100, "bytesDownloaded": 1024, "bytesTotal": 1024,
+        }))
+
+        status = get_bootstrap_status()
+        assert status.active is True
+
+    def test_path_traversal_rejected(self, data_dir):
+        status_file = data_dir / "bootstrap-status.json"
+        status_file.write_text(json.dumps({
+            "status": "downloading", "model": "../../etc/passwd",
+            "percent": 50, "bytesDownloaded": 500, "bytesTotal": 1000,
+        }))
+
+        status = get_bootstrap_status()
+        assert status.active is True
+
 
 # --- _update_lifetime_tokens ---
 
