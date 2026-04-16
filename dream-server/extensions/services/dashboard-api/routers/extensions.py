@@ -252,6 +252,7 @@ def _resolve_extension_dir(service_id: str) -> Path:
     )
 
 
+
 def _scan_compose_content(
     compose_path: Path,
     *,
@@ -1108,7 +1109,10 @@ def _activate_service(service_id: str) -> dict:
 
     # Re-scan compose content (TOCTOU prevention). Built-in extensions
     # legitimately declare their own service name in their compose file, so
-    # skip the CORE_SERVICE_IDS name-collision check for them.
+    # skip the CORE_SERVICE_IDS name-collision check for them. User extensions
+    # still get the full anti-shadowing scan. The `trusted` flag is separate
+    # and controls whether `build:` directives are allowed (library installs
+    # need it, built-in activations do not).
     is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
     _scan_compose_content(disabled_compose, skip_name_collision=is_builtin)
 
