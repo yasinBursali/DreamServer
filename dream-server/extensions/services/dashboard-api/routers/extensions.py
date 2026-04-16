@@ -22,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from config import (
-    AGENT_URL, CORE_SERVICE_IDS, DATA_DIR,
+    AGENT_URL, ALWAYS_ON_SERVICES, CORE_SERVICE_IDS, DATA_DIR,
     DREAM_AGENT_KEY, EXTENSION_CATALOG, EXTENSIONS_DIR,
     EXTENSIONS_LIBRARY_DIR, GPU_BACKEND, INSTALL_DIR, SERVICES,
     USER_EXTENSIONS_DIR,
@@ -222,14 +222,42 @@ def _validate_service_id(service_id: str) -> None:
 
 
 def _assert_not_core(service_id: str) -> None:
-    """Raise 403 if the service_id belongs to a core service."""
-    if service_id in CORE_SERVICE_IDS:
+    """Raise 403 if the service_id is an always-on base-compose service.
+
+    Only blocks the 4 services from docker-compose.base.yml (llama-server,
+    open-webui, dashboard, dashboard-api). Built-in extensions (n8n, tts, etc.)
+    are allowed through because they're managed via compose.yaml toggle.
+    """
+    if service_id in ALWAYS_ON_SERVICES:
         raise HTTPException(
-            status_code=403, detail=f"Cannot modify core service: {service_id}",
+            status_code=403, detail=f"Cannot modify always-on service: {service_id}",
         )
 
 
-def _scan_compose_content(compose_path: Path, *, trusted: bool = False) -> None:
+def _resolve_extension_dir(service_id: str) -> Path:
+    """Resolve an extension's directory, checking user-extensions first, then built-in.
+
+    Raises HTTPException(404) if not found or path traversal is detected.
+    """
+    user_dir = (USER_EXTENSIONS_DIR / service_id).resolve()
+    if user_dir.is_relative_to(USER_EXTENSIONS_DIR.resolve()) and user_dir.is_dir():
+        return user_dir
+
+    builtin_dir = (EXTENSIONS_DIR / service_id).resolve()
+    if builtin_dir.is_relative_to(EXTENSIONS_DIR.resolve()) and builtin_dir.is_dir():
+        return builtin_dir
+
+    raise HTTPException(
+        status_code=404, detail=f"Extension not found: {service_id}",
+    )
+
+
+def _scan_compose_content(
+    compose_path: Path,
+    *,
+    trusted: bool = False,
+    skip_name_collision: bool = False,
+) -> None:
     """Reject compose files containing dangerous directives."""
     try:
         data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
@@ -245,12 +273,13 @@ def _scan_compose_content(compose_path: Path, *, trusted: bool = False) -> None:
     if not isinstance(services, dict):
         return
 
-    for svc_name in services:
-        if svc_name in CORE_SERVICE_IDS:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Extension rejected: service name '{svc_name}' conflicts with core service",
-            )
+    if not skip_name_collision:
+        for svc_name in services:
+            if svc_name in CORE_SERVICE_IDS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Extension rejected: service name '{svc_name}' conflicts with core service",
+                )
 
     for svc_name, svc_def in services.items():
         if not isinstance(svc_def, dict):
@@ -539,6 +568,27 @@ def _call_agent_install(service_id: str) -> bool:
         return False
     except OSError as exc:
         logger.warning("Host agent install error for %s: %s", service_id, exc)
+        return False
+
+
+def _call_agent_compose_rename(action: str, service_id: str) -> bool:
+    """Ask host agent to rename compose.yaml <-> compose.yaml.disabled.
+
+    Used for built-in extensions where the extensions mount is read-only.
+    action must be 'activate' or 'deactivate'.
+    """
+    url = f"{AGENT_URL}/v1/extension/{action}"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {DREAM_AGENT_KEY}",
+    }
+    data = json.dumps({"service_id": service_id}).encode()
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=_AGENT_LOG_TIMEOUT) as resp:
+            return resp.status == 200
+    except Exception:
+        logger.warning("Host agent unreachable for compose rename at %s", AGENT_URL)
         return False
 
 
@@ -992,8 +1042,8 @@ def _read_direct_deps(service_id: str) -> list[str]:
 
 
 def _is_dep_satisfied(dep: str) -> bool:
-    """Check if a dependency is already enabled (core, built-in, or user)."""
-    if dep in CORE_SERVICE_IDS:
+    """Check if a dependency is already enabled (always-on, built-in, or user)."""
+    if dep in ALWAYS_ON_SERVICES:
         return True
     if (EXTENSIONS_DIR / dep / "compose.yaml").exists():
         return True
@@ -1039,15 +1089,7 @@ def _activate_service(service_id: str) -> dict:
     Returns a result dict for the service. Cycle detection is handled
     upstream by _get_missing_deps_transitive.
     """
-    ext_dir = (USER_EXTENSIONS_DIR / service_id).resolve()
-    if not ext_dir.is_relative_to(USER_EXTENSIONS_DIR.resolve()):
-        raise HTTPException(
-            status_code=404, detail=f"Extension not found: {service_id}",
-        )
-    if not ext_dir.is_dir():
-        raise HTTPException(
-            status_code=404, detail=f"Extension not installed: {service_id}",
-        )
+    ext_dir = _resolve_extension_dir(service_id)
 
     disabled_compose = ext_dir / "compose.yaml.disabled"
     enabled_compose = ext_dir / "compose.yaml"
@@ -1061,8 +1103,11 @@ def _activate_service(service_id: str) -> dict:
             status_code=404, detail=f"Extension has no compose file: {service_id}",
         )
 
-    # Re-scan compose content (TOCTOU prevention)
-    _scan_compose_content(disabled_compose)
+    # Re-scan compose content (TOCTOU prevention). Built-in extensions
+    # legitimately declare their own service name in their compose file, so
+    # skip the CORE_SERVICE_IDS name-collision check for them.
+    is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
+    _scan_compose_content(disabled_compose, skip_name_collision=is_builtin)
 
     # Reject symlinks
     st = os.lstat(disabled_compose)
@@ -1071,7 +1116,15 @@ def _activate_service(service_id: str) -> dict:
             status_code=400, detail="Compose file is a symlink",
         )
 
-    os.rename(str(disabled_compose), str(enabled_compose))
+    # Built-in extensions live on a :ro mount — delegate rename to host agent
+    if is_builtin:
+        if not _call_agent_compose_rename("activate", service_id):
+            raise HTTPException(
+                status_code=502,
+                detail=f"Host agent failed to activate extension: {service_id}",
+            )
+    else:
+        os.rename(str(disabled_compose), str(enabled_compose))
     logger.info("Enabled extension (activate): %s", service_id)
     return {"id": service_id, "action": "enabled"}
 
@@ -1086,15 +1139,7 @@ def enable_extension(
     _validate_service_id(service_id)
     _assert_not_core(service_id)
 
-    ext_dir = (USER_EXTENSIONS_DIR / service_id).resolve()
-    if not ext_dir.is_relative_to(USER_EXTENSIONS_DIR.resolve()):
-        raise HTTPException(
-            status_code=404, detail=f"Extension not found: {service_id}",
-        )
-    if not ext_dir.is_dir():
-        raise HTTPException(
-            status_code=404, detail=f"Extension not installed: {service_id}",
-        )
+    ext_dir = _resolve_extension_dir(service_id)
 
     disabled_compose = ext_dir / "compose.yaml.disabled"
     enabled_compose = ext_dir / "compose.yaml"
@@ -1107,7 +1152,11 @@ def enable_extension(
                 raise HTTPException(
                     status_code=400, detail="Compose file is a symlink",
                 )
-            _scan_compose_content(enabled_compose)
+            # Built-in extensions legitimately use their own service name which
+            # appears in CORE_SERVICE_IDS — skip the name-collision check for
+            # them, mirroring _activate_service's logic.
+            is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
+            _scan_compose_content(enabled_compose, skip_name_collision=is_builtin)
         # Dependencies were satisfied at install time; compose content is re-scanned above
         _write_initial_progress(service_id)
         agent_ok = _call_agent("start", service_id)
@@ -1189,15 +1238,7 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
     _validate_service_id(service_id)
     _assert_not_core(service_id)
 
-    ext_dir = (USER_EXTENSIONS_DIR / service_id).resolve()
-    if not ext_dir.is_relative_to(USER_EXTENSIONS_DIR.resolve()):
-        raise HTTPException(
-            status_code=404, detail=f"Extension not found: {service_id}",
-        )
-    if not ext_dir.is_dir():
-        raise HTTPException(
-            status_code=404, detail=f"Extension not installed: {service_id}",
-        )
+    ext_dir = _resolve_extension_dir(service_id)
 
     enabled_compose = ext_dir / "compose.yaml"
     disabled_compose = ext_dir / "compose.yaml.disabled"
@@ -1244,7 +1285,16 @@ def disable_extension(service_id: str, include_data_info: bool = Query(True), ap
                 status_code=400, detail="Compose file is a symlink",
             )
 
-        os.rename(str(enabled_compose), str(disabled_compose))
+        # Built-in extensions live on a :ro mount — delegate rename to host agent
+        is_builtin = ext_dir.is_relative_to(EXTENSIONS_DIR.resolve())
+        if is_builtin:
+            if not _call_agent_compose_rename("deactivate", service_id):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Host agent failed to deactivate extension: {service_id}",
+                )
+        else:
+            os.rename(str(enabled_compose), str(disabled_compose))
         _call_agent_invalidate_compose_cache()
 
         progress_file = Path(DATA_DIR) / "extension-progress" / f"{service_id}.json"
@@ -1337,8 +1387,8 @@ def purge_extension_data(
     if not _SERVICE_ID_RE.match(service_id):
         raise HTTPException(status_code=404, detail=f"Invalid service_id: {service_id}")
 
-    if service_id in CORE_SERVICE_IDS:
-        raise HTTPException(status_code=403, detail="Cannot purge core service data")
+    if service_id in ALWAYS_ON_SERVICES:
+        raise HTTPException(status_code=403, detail="Cannot purge always-on service data")
 
     with _extensions_lock():
         # Check if service is still enabled (built-in or user extension)
