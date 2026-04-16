@@ -1086,6 +1086,9 @@ def _get_missing_deps_transitive(
 def _activate_service(service_id: str) -> dict:
     """Core enable logic — NO lock acquisition. Called inside _extensions_lock.
 
+    Checks both USER_EXTENSIONS_DIR (user-installed) and EXTENSIONS_DIR
+    (built-in) so templates can enable built-in extensions like n8n, tts, etc.
+
     Returns a result dict for the service. Cycle detection is handled
     upstream by _get_missing_deps_transitive.
     """
