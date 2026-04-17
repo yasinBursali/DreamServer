@@ -461,7 +461,7 @@ LITELLM_UPGRADE_EOF
         # Restart DreamForge so it auto-detects the new model from llama-server
         if $DOCKER_CMD ps --filter name=dream-dreamforge --format '{{.Names}}' 2>/dev/null | grep -q dream-dreamforge; then
             log "Restarting DreamForge to pick up model change..."
-            docker restart dream-dreamforge 2>&1 || log "WARNING: DreamForge restart failed (non-fatal)"
+            $DOCKER_CMD restart dream-dreamforge 2>&1 || log "WARNING: DreamForge restart failed (non-fatal)"
         fi
     else
         log "WARNING: llama-server health check timed out. The model may still be loading."
