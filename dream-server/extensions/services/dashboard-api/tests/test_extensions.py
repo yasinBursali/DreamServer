@@ -9,6 +9,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 from models import ServiceStatus
+from routers.extensions import _assert_not_core
 
 
 # --- Helpers ---
@@ -633,6 +634,40 @@ class TestDisableExtension:
         assert data["restart_required"] is True
         assert (user_dir / "my-ext" / "compose.yaml.disabled").exists()
         assert not (user_dir / "my-ext" / "compose.yaml").exists()
+
+    def test_disable_builtin_delegates_to_host_agent(
+        self, test_client, monkeypatch, tmp_path,
+    ):
+        builtin_root = tmp_path / "builtin"
+        ext_dir = builtin_root / "my-ext"
+        ext_dir.mkdir(parents=True)
+        (ext_dir / "compose.yaml").write_text(_SAFE_COMPOSE)
+        _patch_mutation_config(monkeypatch, tmp_path)
+        monkeypatch.setattr("routers.extensions.EXTENSIONS_DIR", builtin_root)
+        monkeypatch.setattr("routers.extensions._call_agent", lambda action, sid: True)
+
+        calls = []
+
+        def _mock_compose_rename(action, service_id):
+            calls.append((action, service_id))
+            (ext_dir / "compose.yaml").rename(ext_dir / "compose.yaml.disabled")
+            return True
+
+        monkeypatch.setattr(
+            "routers.extensions._call_agent_compose_rename",
+            _mock_compose_rename,
+        )
+
+        resp = test_client.post(
+            "/api/extensions/my-ext/disable",
+            headers=test_client.auth_headers,
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["action"] == "disabled"
+        assert calls == [("deactivate", "my-ext")]
+        assert (ext_dir / "compose.yaml.disabled").exists()
+        assert not (ext_dir / "compose.yaml").exists()
 
     def test_disable_unlinks_progress_file(self, test_client, monkeypatch, tmp_path):
         """Disable removes the stale progress file so status reflects reality."""
@@ -1589,7 +1624,7 @@ class TestPurgeExtensionData:
         )
 
         assert resp.status_code == 403
-        assert "core service" in resp.json()["detail"].lower()
+        assert "always-on service" in resp.json()["detail"].lower()
 
     def test_purge_404_invalid_id(self, test_client, monkeypatch, tmp_path):
         """404 for service_id that fails regex validation."""
@@ -2121,10 +2156,22 @@ class TestActivateServiceBuiltinBranch:
 
         monkeypatch.setattr("routers.extensions.EXTENSIONS_DIR", builtin_root)
         monkeypatch.setattr("routers.extensions.USER_EXTENSIONS_DIR", user_root)
+        calls = []
+
+        def _mock_compose_rename(action, service_id):
+            calls.append((action, service_id))
+            (ext_dir / "compose.yaml.disabled").rename(ext_dir / "compose.yaml")
+            return True
+
+        monkeypatch.setattr(
+            "routers.extensions._call_agent_compose_rename",
+            _mock_compose_rename,
+        )
 
         result = _activate_service("fakesvc")
 
         assert result == {"id": "fakesvc", "action": "enabled"}
+        assert calls == [("activate", "fakesvc")]
         assert (ext_dir / "compose.yaml").exists()
         assert not (ext_dir / "compose.yaml.disabled").exists()
 
@@ -2184,3 +2231,25 @@ class TestActivateServiceBuiltinBranch:
         assert not (user_ext / "compose.yaml.disabled").exists()
         # Built-in untouched
         assert builtin_compose.exists()
+
+
+class TestAssertNotCoreAllowsBuiltins:
+    """_assert_not_core blocks only the 4 always-on base-compose services."""
+
+    @pytest.mark.parametrize("service_id", [
+        "n8n", "tts", "whisper", "comfyui", "litellm", "openclaw",
+        "perplexica", "searxng", "privacy-shield", "token-spy", "qdrant",
+        "embeddings", "ape", "dreamforge", "langfuse", "opencode",
+    ])
+    def test_assert_not_core_allows_builtin_extension(self, service_id):
+        """Built-in extensions are toggleable and must not be blocked."""
+        _assert_not_core(service_id)
+
+    @pytest.mark.parametrize("service_id", [
+        "llama-server", "open-webui", "dashboard", "dashboard-api",
+    ])
+    def test_assert_not_core_blocks_always_on(self, service_id):
+        """Always-on base-compose services must raise 403."""
+        with pytest.raises(HTTPException) as exc_info:
+            _assert_not_core(service_id)
+        assert exc_info.value.status_code == 403
