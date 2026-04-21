@@ -3,7 +3,7 @@
 # ============================================================================
 # Part of: installers/windows/lib/
 # Purpose: Build a shareable support bundle with compose + system diagnostics.
-# Requires: ui.ps1 and detection.ps1 sourced first.
+# Requires: ui.ps1, detection.ps1, and llm-endpoint.ps1 sourced first.
 # ============================================================================
 
 function Invoke-OptionalCommand {
@@ -66,6 +66,7 @@ function Test-HttpEndpoint {
 
 function New-DreamInstallReport {
     param(
+        [string]$InstallDir = $script:DS_INSTALL_DIR,
         [Parameter(Mandatory = $true)]
         [AllowEmptyCollection()]
         [string[]]$ComposeFlags
@@ -80,6 +81,7 @@ function New-DreamInstallReport {
     if (Get-Command Get-NativeInferenceBackend -ErrorAction SilentlyContinue) {
         $nativeBackend = Get-NativeInferenceBackend
     }
+    $llmEndpoint = Get-WindowsLocalLlmEndpoint -InstallDir $InstallDir -GpuBackend $gpu.Backend -NativeBackend $nativeBackend
 
     $composeConfigArgs = @("compose") + $ComposeFlags + @("config")
     $composePsArgs = @("compose") + $ComposeFlags + @("ps", "-a")
@@ -108,7 +110,7 @@ function New-DreamInstallReport {
             compose_ps = Invoke-OptionalCommand -Command "docker" -CommandArgs $composePsArgs -MaxLines 80
         }
         health = [ordered]@{
-            llm_api = Test-HttpEndpoint -Url "http://localhost:8080/health"
+            llm_api = Test-HttpEndpoint -Url $llmEndpoint.HealthUrl
             open_webui = Test-HttpEndpoint -Url "http://localhost:3000"
             dashboard = Test-HttpEndpoint -Url "http://localhost:3001"
             dashboard_api = Test-HttpEndpoint -Url "http://localhost:3002/health"
@@ -133,7 +135,7 @@ function Write-DreamInstallReport {
     $jsonPath = Join-Path $artifactsDir "report.json"
     $txtPath = Join-Path $artifactsDir "report.txt"
 
-    $report = New-DreamInstallReport -ComposeFlags $ComposeFlags
+    $report = New-DreamInstallReport -InstallDir $InstallDir -ComposeFlags $ComposeFlags
     ($report | ConvertTo-Json -Depth 8) | Set-Content -Path $jsonPath -Encoding UTF8
 
     $lines = @()

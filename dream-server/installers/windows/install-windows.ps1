@@ -69,6 +69,7 @@ $LibDir = Join-Path $ScriptDir "lib"
 . (Join-Path $LibDir "tier-map.ps1")
 . (Join-Path $LibDir "detection.ps1")
 . (Join-Path $LibDir "env-generator.ps1")
+. (Join-Path $LibDir "llm-endpoint.ps1")
 
 # ── Phase context variables ───────────────────────────────────────────────────
 # These are plain (non-$script:) variables set in the orchestrator scope.
@@ -93,6 +94,65 @@ $installDir     = $script:DS_INSTALL_DIR
 $sourceRoot     = $SourceRoot
 
 # ── Phase dispatcher ──────────────────────────────────────────────────────────
+function Get-UsableWindowsBash {
+    <#
+    .SYNOPSIS
+        Prefer a Git Bash-style shell for bootstrap-upgrade.sh on Windows.
+    #>
+    param(
+        [string]$InstallPath = $installDir
+    )
+
+    $probeCommand = "command -v bash >/dev/null 2>&1"
+    if ($InstallPath -match "^([A-Za-z]):") {
+        $probeCommand += " && test -d /$($Matches[1].ToLower())"
+    }
+
+    $candidates = New-Object 'System.Collections.Generic.List[string]'
+
+    $gitCmd = Get-Command git -ErrorAction SilentlyContinue
+    if ($gitCmd -and $gitCmd.Source) {
+        $gitRoot = Split-Path (Split-Path $gitCmd.Source -Parent) -Parent
+        $gitBash = Join-Path $gitRoot "bin\bash.exe"
+        if (Test-Path $gitBash) {
+            [void]$candidates.Add($gitBash)
+        }
+    }
+
+    $programFilesBash = Join-Path $env:ProgramFiles "Git\bin\bash.exe"
+    if (Test-Path $programFilesBash) {
+        [void]$candidates.Add($programFilesBash)
+    }
+
+    if (${env:ProgramFiles(x86)} -and $env:ProgramFiles -ne ${env:ProgramFiles(x86)}) {
+        $programFilesX86Bash = Join-Path ${env:ProgramFiles(x86)} "Git\bin\bash.exe"
+        if (Test-Path $programFilesX86Bash) {
+            [void]$candidates.Add($programFilesX86Bash)
+        }
+    }
+
+    $bashCmd = Get-Command bash -ErrorAction SilentlyContinue
+    if ($bashCmd -and $bashCmd.Source) {
+        [void]$candidates.Add($bashCmd.Source)
+    }
+
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($seen.ContainsKey($candidate)) { continue }
+        $seen[$candidate] = $true
+
+        try {
+            & $candidate -lc $probeCommand *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return $candidate
+            }
+        } catch { }
+    }
+
+    return $null
+}
+
 $PhasesDir = Join-Path $ScriptDir "phases"
 
 Write-DreamBanner
@@ -575,13 +635,29 @@ exec bash "$bashScript" "$bashInstallDir" "$($fullTierConfig.GgufFile)" "$($full
 "@
                 [System.IO.File]::WriteAllText($wrapperScript, $wrapperContent.Replace("`r`n", "`n"), (New-Object System.Text.UTF8Encoding($false)))
 
-                Start-Process -FilePath "bash" -ArgumentList $wrapperScript `
-                    -WindowStyle Hidden `
-                    -RedirectStandardOutput $upgradeLog `
-                    -RedirectStandardError $upgradeErrLog
+                $bashPath = Get-UsableWindowsBash -InstallPath $installDir
+                if ($bashPath) {
+                    $upgradeProc = Start-Process -FilePath $bashPath -ArgumentList $wrapperScript `
+                        -WindowStyle Hidden `
+                        -RedirectStandardOutput $upgradeLog `
+                        -RedirectStandardError $upgradeErrLog `
+                        -PassThru
 
-                Write-AI "Full model ($($fullTierConfig.LlmModel)) downloading in background."
-                Write-AI "Check progress: Get-Content '$upgradeLog' -Tail 10"
+                    Start-Sleep -Seconds 2
+                    $upgradeProc.Refresh()
+
+                    if ($upgradeProc.HasExited) {
+                        Write-AIWarn "Background full-model download exited immediately (exit code: $($upgradeProc.ExitCode))."
+                        Write-AI "  Retry manually with: & '$bashPath' '$wrapperScript'"
+                        Write-AI "  Error log: $upgradeErrLog"
+                    } else {
+                        Write-AI "Full model ($($fullTierConfig.LlmModel)) downloading in background."
+                        Write-AI "Check progress: Get-Content '$upgradeLog' -Tail 10"
+                    }
+                } else {
+                    Write-AIWarn "No Git Bash-compatible shell was found for bootstrap-upgrade.sh."
+                    Write-AI "  Install Git for Windows or run the upgrade script manually after adding bash.exe to PATH."
+                }
             } else {
                 Write-AIWarn "bootstrap-upgrade.sh not found at $upgradeScript"
                 Write-AIWarn "Download the full model manually or re-run the installer."
@@ -608,22 +684,15 @@ if ($dryRun) {
 }
 
 # ── Service health checks ─────────────────────────────────────────────────────
-# Use Lemonade health endpoint when AMD + Lemonade is active, llama-server otherwise
-$llmHealthUrl = $(if ($useLemonade) {
-    $script:LEMONADE_HEALTH_URL
-} else {
-    "http://localhost:8080/health"
-})
-$llmHealthName = $(if ($useLemonade) { "LLM (Lemonade)" } else { "LLM (llama-server)" })
+$llmEndpoint = Get-WindowsLocalLlmEndpoint -InstallDir $installDir `
+    -EnvMap (Get-WindowsDreamEnvMap -InstallDir $installDir) `
+    -UseLemonade:$useLemonade -GpuBackend $gpuInfo.Backend -CloudMode:$cloudMode
 $healthChecks = @(
-    @{ Name = $llmHealthName; Url = $llmHealthUrl }
+    @{ Name = $llmEndpoint.Name; Url = $llmEndpoint.HealthUrl }
     @{ Name = "Chat UI (Open WebUI)"; Url = "http://localhost:3000" }
 )
 if ($enableVoice)     { $healthChecks += @{ Name = "Whisper (STT)";    Url = "http://localhost:9000/health" } }
 if ($enableWorkflows) { $healthChecks += @{ Name = "n8n (Workflows)";   Url = "http://localhost:5678/healthz" } }
-if (Test-Path $script:OPENCODE_EXE) {
-    $healthChecks += @{ Name = "OpenCode (IDE)"; Url = "http://localhost:$($script:OPENCODE_PORT)/" }
-}
 
 Write-AI "Running health checks..."
 $maxAttempts = 60; $allHealthy = $true

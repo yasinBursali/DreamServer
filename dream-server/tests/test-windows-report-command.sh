@@ -11,6 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 DREAM_PS1="$ROOT_DIR/installers/windows/dream.ps1"
 REPORT_LIB="$ROOT_DIR/installers/windows/lib/install-report.ps1"
+LLM_HELPER_LIB="$ROOT_DIR/installers/windows/lib/llm-endpoint.ps1"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -27,14 +28,22 @@ echo ""
 
 [[ -f "$DREAM_PS1" ]] && pass "dream.ps1 exists" || fail "dream.ps1 missing"
 [[ -f "$REPORT_LIB" ]] && pass "install-report.ps1 exists" || fail "install-report.ps1 missing"
+[[ -f "$LLM_HELPER_LIB" ]] && pass "llm-endpoint.ps1 exists" || fail "llm-endpoint.ps1 missing"
 
 grep -q "install-report.ps1" "$DREAM_PS1" && pass "dream.ps1 sources report library" || fail "dream.ps1 missing report library source"
+grep -q "llm-endpoint.ps1" "$DREAM_PS1" && pass "dream.ps1 sources llm endpoint helper" || fail "dream.ps1 missing llm endpoint helper source"
 grep -q "function Invoke-Report" "$DREAM_PS1" && pass "Invoke-Report function exists" || fail "Invoke-Report function missing"
 grep -q '"report"  { Invoke-Report }' "$DREAM_PS1" && pass "report command dispatch exists" || fail "report command dispatch missing"
 grep -q "Generate Windows diagnostics bundle" "$DREAM_PS1" && pass "help text includes report command" || fail "help text missing report command"
 
 grep -q "function Write-DreamInstallReport" "$REPORT_LIB" && pass "report writer function exists" || fail "report writer function missing"
 grep -q "windows-report" "$REPORT_LIB" && pass "report output path is defined" || fail "report output path missing"
+grep -q "Get-WindowsLocalLlmEndpoint" "$REPORT_LIB" && pass "report uses shared llm endpoint helper" || fail "report missing shared llm endpoint helper"
+if grep -q 'http://localhost:8080/health' "$REPORT_LIB"; then
+    fail "report lib still hardcodes localhost:8080/health"
+else
+    pass "report lib does not hardcode localhost:8080/health"
+fi
 
 echo ""
 echo "Result: $PASS passed, $FAIL failed"

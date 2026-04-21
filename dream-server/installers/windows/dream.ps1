@@ -39,6 +39,7 @@ $LibDir = Join-Path $ScriptDir "lib"
 . (Join-Path $LibDir "ui.ps1")
 . (Join-Path $LibDir "compose-diagnostics.ps1")
 . (Join-Path $LibDir "detection.ps1")
+. (Join-Path $LibDir "llm-endpoint.ps1")
 . (Join-Path $LibDir "install-report.ps1")
 
 # ── Resolve install directory ──
@@ -124,20 +125,7 @@ function Read-DreamEnv {
     .SYNOPSIS
         Safely load .env file into a hashtable (no eval, no injection).
     #>
-    $envFile = Join-Path $InstallDir ".env"
-    $result = @{}
-    if (-not (Test-Path $envFile)) { return $result }
-
-    Get-Content $envFile | ForEach-Object {
-        $line = $_.Trim()
-        if ($line -match "^#" -or $line -eq "") { return }
-        if ($line -match "^([A-Za-z_][A-Za-z0-9_]*)=(.*)$") {
-            $key = $Matches[1]
-            $val = $Matches[2].Trim('"').Trim("'")
-            $result[$key] = $val
-        }
-    }
-    return $result
+    return Get-WindowsDreamEnvMap -InstallDir $InstallDir
 }
 
 function Set-DreamEnvValue {
@@ -464,13 +452,9 @@ function Invoke-Status {
         Write-Host "  Health Checks" -ForegroundColor Cyan
         Write-Host ("  " + ("-" * 40)) -ForegroundColor DarkGray
 
-        $llmHealthUrl = $(if ((Get-NativeInferenceBackend) -eq "lemonade") {
-            $script:LEMONADE_HEALTH_URL
-        } else {
-            "http://localhost:8080/health"
-        })
+        $llmEndpoint = Get-WindowsLocalLlmEndpoint -InstallDir $InstallDir -NativeBackend (Get-NativeInferenceBackend)
         $endpoints = @(
-            @{ Name = "LLM API";    Url = $llmHealthUrl }
+            @{ Name = "LLM API";    Url = $llmEndpoint.HealthUrl }
             @{ Name = "Chat UI";    Url = "http://localhost:3000" }
             @{ Name = "Dashboard";  Url = "http://localhost:3001" }
         )
@@ -702,9 +686,9 @@ function Invoke-Chat {
         )
     } | ConvertTo-Json -Depth 3
 
-    $chatBasePath = $(if ((Get-NativeInferenceBackend) -eq "lemonade") { "/api/v1" } else { "/v1" })
+    $llmEndpoint = Get-WindowsLocalLlmEndpoint -InstallDir $InstallDir -NativeBackend (Get-NativeInferenceBackend)
     try {
-        $resp = Invoke-RestMethod -Uri "http://localhost:8080${chatBasePath}/chat/completions" `
+        $resp = Invoke-RestMethod -Uri $llmEndpoint.ChatCompletionsUrl `
             -Method POST -Body $body -ContentType "application/json" -TimeoutSec 120
 
         if ($resp.choices -and $resp.choices[0].message) {
