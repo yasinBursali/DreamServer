@@ -796,7 +796,7 @@ cmd_status_json() {
             --arg backend "apple" \
             --arg chip "$_chip" \
             --argjson unified_memory_gb "$_total_mem_gb" \
-            --arg gpu_cores "$_gpu_cores" \
+            --argjson gpu_cores "$([[ "$_gpu_cores" =~ ^[0-9]+$ ]] && printf '%s' "$_gpu_cores" || printf 'null')" \
             '{backend: $backend, chip: $chip, unified_memory_gb: $unified_memory_gb, gpu_cores: $gpu_cores}')
     elif command -v nvidia-smi >/dev/null 2>&1; then
         # Represent each GPU line as raw strings in an array
@@ -2604,11 +2604,15 @@ _gpu_status() {
     check_install
     load_env
 
-    local gpu_count
-    gpu_count=$(nvidia-smi --list-gpus 2>/dev/null | wc -l | tr -d ' ') || gpu_count=0
-
-    echo -e "${BLUE}━━━ GPU Status (${gpu_count} GPU$([ "$gpu_count" -ne 1 ] && echo s)) ━━━${NC}"
-    echo ""
+    if [[ "${GPU_BACKEND:-}" == "apple" ]]; then
+        echo -e "${BLUE}━━━ GPU Status (1 integrated GPU) ━━━${NC}"
+        echo ""
+    else
+        local gpu_count
+        gpu_count=$(nvidia-smi --list-gpus 2>/dev/null | wc -l | tr -d ' ') || gpu_count=0
+        echo -e "${BLUE}━━━ GPU Status (${gpu_count} GPU$([ "$gpu_count" -ne 1 ] && echo s)) ━━━${NC}"
+        echo ""
+    fi
 
     if [[ "${GPU_BACKEND:-nvidia}" == "nvidia" ]] && command -v nvidia-smi &>/dev/null && [ "$gpu_count" -gt 0 ]; then
         local output
