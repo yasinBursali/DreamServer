@@ -12,6 +12,7 @@ The Dashboard API runs inside a Docker container and cannot directly run `docker
 |----------|-----------|
 | Linux | systemd user service (`scripts/systemd/dream-host-agent.service`) |
 | macOS | Started by the installer (`installers/macos/install-macos.sh`) |
+| Windows | Started by the installer (`installers/windows/phases/07-devtools.ps1`, managed via `dream.ps1`) |
 
 The agent is started during installation (phase 07 on Linux) and binds to `127.0.0.1` only — it is not accessible from the network.
 
