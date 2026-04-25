@@ -216,6 +216,127 @@ class TestComposeToggleWire:
             thread.join(timeout=2)
 
 
+class TestSyncExtensionConfigWire:
+    """End-to-end HTTP test: dashboard-api client + real host-agent handler.
+
+    Proves that ${INSTALL_DIR}/config/<svc>/ ends up populated even though
+    the dashboard-api side only does an HTTP call (not filesystem work).
+    """
+
+    def _make_extension(self, user_root, sid):
+        ext = user_root / sid
+        cfg = ext / "config" / sid
+        cfg.mkdir(parents=True)
+        (cfg / "settings.yaml").write_text("server: ok\n", encoding="utf-8")
+        (cfg / "entrypoint.sh").write_text("#!/bin/sh\necho run\n", encoding="utf-8")
+        return ext
+
+    def test_client_posts_and_host_agent_copies_config(self, tmp_path, monkeypatch):
+        import threading
+        from http.server import HTTPServer
+
+        from routers import extensions as ext_router
+
+        install_dir = tmp_path / "install"
+        user_root = install_dir / "data" / "user-extensions"
+        install_dir.mkdir()
+        user_root.mkdir(parents=True)
+        self._make_extension(user_root, "fakesvc")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", tmp_path / "builtin-empty")
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "wire-test-secret")
+
+        server = HTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setattr(ext_router, "AGENT_URL", f"http://127.0.0.1:{port}")
+            monkeypatch.setattr(ext_router, "DREAM_AGENT_KEY", "wire-test-secret")
+
+            assert ext_router._call_agent_sync_config("fakesvc") is True
+
+            target = install_dir / "config" / "fakesvc"
+            assert (target / "settings.yaml").read_text(encoding="utf-8") == "server: ok\n"
+            # .sh files become executable
+            import stat as _s
+            mode = (target / "entrypoint.sh").stat().st_mode
+            assert mode & _s.S_IXUSR
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_noop_when_extension_has_no_config_subdir(self, tmp_path, monkeypatch):
+        import threading
+        from http.server import HTTPServer
+
+        from routers import extensions as ext_router
+
+        install_dir = tmp_path / "install"
+        user_root = install_dir / "data" / "user-extensions"
+        install_dir.mkdir()
+        user_root.mkdir(parents=True)
+        (user_root / "noconfig").mkdir()  # no config/ subdir
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", tmp_path / "builtin-empty")
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "wire-test-secret")
+
+        server = HTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setattr(ext_router, "AGENT_URL", f"http://127.0.0.1:{port}")
+            monkeypatch.setattr(ext_router, "DREAM_AGENT_KEY", "wire-test-secret")
+
+            # No config/ → server returns 200 with empty synced list, helper True.
+            assert ext_router._call_agent_sync_config("noconfig") is True
+            # No INSTALL_DIR/config/noconfig should have been created.
+            assert not (install_dir / "config" / "noconfig").exists()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    def test_rejects_wrong_auth(self, tmp_path, monkeypatch):
+        import threading
+        from http.server import HTTPServer
+
+        from routers import extensions as ext_router
+
+        install_dir = tmp_path / "install"
+        user_root = install_dir / "data" / "user-extensions"
+        install_dir.mkdir()
+        user_root.mkdir(parents=True)
+        self._make_extension(user_root, "fakesvc")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", tmp_path / "builtin-empty")
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "wire-test-secret")
+
+        server = HTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            monkeypatch.setattr(ext_router, "AGENT_URL", f"http://127.0.0.1:{port}")
+            monkeypatch.setattr(ext_router, "DREAM_AGENT_KEY", "wrong-secret")
+
+            assert ext_router._call_agent_sync_config("fakesvc") is False
+            # Nothing copied — auth was rejected before any work.
+            assert not (install_dir / "config" / "fakesvc").exists()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
 class TestInvalidateComposeCache:
 
     def test_unlinks_existing_cache_file(self, tmp_path, monkeypatch):
