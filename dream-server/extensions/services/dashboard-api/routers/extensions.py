@@ -475,6 +475,18 @@ _AGENT_TIMEOUT = 300  # seconds — image pulls can take several minutes on firs
 _AGENT_LOG_TIMEOUT = 30  # seconds — log fetches should be fast
 
 
+def _fetch_agent_logs(url: str, headers: dict, data: bytes, timeout: int) -> str:
+    """Blocking POST to host agent that returns the response body as text.
+
+    Extracted so async handlers can offload the urllib call via
+    ``asyncio.to_thread``. urllib.error.HTTPError / URLError raised inside
+    propagate back to the caller and are handled there.
+    """
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode()
+
+
 def _call_agent(action: str, service_id: str) -> bool:
     """Call host agent to start/stop a service. Returns True on success."""
     url = f"{AGENT_URL}/v1/extension/{action}"
@@ -487,8 +499,11 @@ def _call_agent(action: str, service_id: str) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=_AGENT_TIMEOUT) as resp:
             return resp.status == 200
-    except Exception:
-        logger.warning("Host agent unreachable at %s — fallback to restart_required", AGENT_URL)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
+        logger.warning(
+            "Host agent unreachable at %s — fallback to restart_required: %s",
+            AGENT_URL, exc,
+        )
         return False
 
 
@@ -503,9 +518,10 @@ def _call_agent_invalidate_compose_cache() -> None:
                 logger.warning(
                     "compose-flags cache invalidation returned HTTP %d", resp.status,
                 )
-    except Exception:
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
         logger.warning(
-            "Host agent unreachable for compose-flags invalidation at %s", AGENT_URL,
+            "Host agent unreachable for compose-flags invalidation at %s: %s",
+            AGENT_URL, exc,
         )
 
 
@@ -583,8 +599,10 @@ def _call_agent_compose_rename(action: str, service_id: str) -> bool:
     try:
         with urllib.request.urlopen(req, timeout=_AGENT_LOG_TIMEOUT) as resp:
             return resp.status == 200
-    except Exception:
-        logger.warning("Host agent unreachable for compose rename at %s", AGENT_URL)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as exc:
+        logger.warning(
+            "Host agent unreachable for compose rename at %s: %s", AGENT_URL, exc,
+        )
         return False
 
 
@@ -603,7 +621,7 @@ def _check_agent_health() -> bool:
         req = urllib.request.Request(f"{AGENT_URL}/health")
         with urllib.request.urlopen(req, timeout=3) as resp:
             available = resp.status == 200
-    except Exception:
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
         available = False
     with _agent_cache_lock:
         _agent_cache.update(available=available, checked_at=time.monotonic())
@@ -645,7 +663,16 @@ async def extensions_catalog(
     api_key: str = Depends(verify_api_key),
 ):
     """Get the extensions catalog with computed status."""
-    asyncio.get_running_loop().run_in_executor(None, _cleanup_stale_progress)
+    _cleanup_future = asyncio.get_running_loop().run_in_executor(
+        None, _cleanup_stale_progress,
+    )
+
+    def _log_cleanup_error(f: asyncio.Future) -> None:
+        exc = f.exception()
+        if exc is not None:
+            logger.error("stale-progress cleanup failed: %s", exc, exc_info=exc)
+
+    _cleanup_future.add_done_callback(_log_cleanup_error)
 
     from helpers import get_cached_services, get_all_services
 
@@ -752,12 +779,14 @@ async def extensions_catalog(
     except OSError:
         lib_available = False
 
+    agent_available = await asyncio.to_thread(_check_agent_health)
+
     return {
         "extensions": extensions,
         "summary": summary,
         "gpu_backend": GPU_BACKEND,
         "library_available": lib_available,
-        "agent_available": _check_agent_health(),
+        "agent_available": agent_available,
     }
 
 
@@ -863,10 +892,11 @@ async def extension_logs(
         "Authorization": f"Bearer {DREAM_AGENT_KEY}",
     }
     data = json.dumps({"service_id": service_id, "tail": 100}).encode()
-    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=_AGENT_LOG_TIMEOUT) as resp:
-            return json.loads(resp.read().decode())
+        body = await asyncio.to_thread(
+            _fetch_agent_logs, url, headers, data, _AGENT_LOG_TIMEOUT,
+        )
+        return json.loads(body)
     except urllib.error.HTTPError as exc:
         try:
             err_body = json.loads(exc.read().decode())

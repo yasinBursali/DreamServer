@@ -2278,3 +2278,63 @@ class TestAssertNotCoreAllowsBuiltins:
         with pytest.raises(HTTPException) as exc_info:
             _assert_not_core(service_id)
         assert exc_info.value.status_code == 403
+
+
+class TestCallAgentErrorNarrowing:
+    """_call_agent swallows network errors but not programmer errors."""
+
+    def test_call_agent_returns_false_on_urlerror(self, monkeypatch, caplog):
+        """Network failures produce (False, warning) — callers rely on this."""
+        import logging
+        import urllib.error
+        from routers import extensions as ext_module
+
+        def _raise(*_args, **_kwargs):
+            raise urllib.error.URLError("timeout")
+
+        monkeypatch.setattr(ext_module.urllib.request, "urlopen", _raise)
+        with caplog.at_level(logging.WARNING, logger="routers.extensions"):
+            result = ext_module._call_agent("start", "svc-x")
+
+        assert result is False
+        assert any("Host agent unreachable" in r.message for r in caplog.records)
+
+    def test_call_agent_reraises_non_network_errors(self, monkeypatch):
+        """Programmer errors (e.g. AttributeError) must not be swallowed."""
+        from routers import extensions as ext_module
+
+        def _raise(*_args, **_kwargs):
+            raise AttributeError("boom")
+
+        monkeypatch.setattr(ext_module.urllib.request, "urlopen", _raise)
+        with pytest.raises(AttributeError):
+            ext_module._call_agent("start", "svc-x")
+
+    def test_catalog_logs_when_cleanup_future_fails(
+        self, test_client, monkeypatch, tmp_path, caplog,
+    ):
+        """Stale-progress cleanup failures are logged, not lost to fire-and-forget."""
+        import logging
+
+        catalog = [_make_catalog_ext("test-svc", "Test Service")]
+        _patch_extensions_config(monkeypatch, catalog, tmp_path=tmp_path)
+
+        def _boom():
+            raise RuntimeError("cleanup exploded")
+
+        monkeypatch.setattr(
+            "routers.extensions._cleanup_stale_progress", _boom,
+        )
+
+        with caplog.at_level(logging.ERROR, logger="routers.extensions"):
+            with patch("helpers.get_all_services", new_callable=AsyncMock,
+                       return_value=[]):
+                resp = test_client.get(
+                    "/api/extensions/catalog",
+                    headers=test_client.auth_headers,
+                )
+
+        assert resp.status_code == 200
+        assert any(
+            "stale-progress cleanup failed" in r.message for r in caplog.records
+        )
