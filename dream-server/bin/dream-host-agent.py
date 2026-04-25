@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import signal
+import stat as stat_mod
 import subprocess
 import sys
 import threading
@@ -734,6 +735,8 @@ class AgentHandler(BaseHTTPRequestHandler):
             self._handle_extension_compose_toggle(activate=True)
         elif self.path == "/v1/extension/deactivate":
             self._handle_extension_compose_toggle(activate=False)
+        elif self.path == "/v1/extension/sync_config":
+            self._handle_extension_sync_config()
         elif self.path == "/v1/service/logs":
             self._handle_service_logs()
         elif self.path == "/v1/model/download":
@@ -1009,6 +1012,130 @@ class AgentHandler(BaseHTTPRequestHandler):
 
         logger.info("%sd extension compose: %s", action, sid)
         json_response(self, 200, {"status": "ok", "service_id": sid, "action": action})
+
+    def _handle_extension_sync_config(self):
+        """Copy <ext_dir>/config/* into INSTALL_DIR/config/.
+
+        Some extensions ship a config/ subdirectory whose files are
+        bind-mounted by compose.yaml relative to the compose project root
+        (INSTALL_DIR), not the extension directory.  Without this sync,
+        Docker auto-creates the mount source as an empty directory and
+        the container fails at startup.
+
+        The dashboard-api previously did this copy itself, but its
+        bind-mount of /dream-server/config is read-only, so it cannot
+        write there.  The host agent runs on the host filesystem
+        (writable) and is the right place for this work.
+        """
+        if not check_auth(self):
+            return
+        body = read_json_body(self)
+        if body is None:
+            return
+
+        sid = body.get("service_id", "")
+        if not isinstance(sid, str) or not SERVICE_ID_RE.match(sid):
+            json_response(self, 400, {"error": "Invalid service_id"})
+            return
+
+        # Only user-installed extensions ship a config/ subdir for sync
+        # at install time; built-in configs are pre-created by the
+        # installer and must not be overwritten on re-toggle.
+        ext_dir = USER_EXTENSIONS_DIR / sid
+        if not ext_dir.is_dir():
+            # Not a user extension — no-op (built-ins handled by installer).
+            json_response(self, 200, {"status": "ok", "service_id": sid, "synced": []})
+            return
+
+        ext_config = ext_dir / "config"
+        if not ext_config.is_dir():
+            json_response(self, 200, {"status": "ok", "service_id": sid, "synced": []})
+            return
+
+        # Reject if the extension's config/ tree contains any symlink that
+        # escapes the extension directory — defence-in-depth against a
+        # malicious/buggy extension shipping config/x -> /etc/shadow.
+        ext_dir_resolved = ext_dir.resolve()
+        for root, _dirs, files in os.walk(str(ext_config), followlinks=False):
+            for name in files:
+                p = Path(root) / name
+                if p.is_symlink():
+                    try:
+                        target_real = p.resolve(strict=False)
+                    except OSError:
+                        target_real = p
+                    if not target_real.is_relative_to(ext_dir_resolved):
+                        json_response(self, 400, {
+                            "error": (
+                                f"config sync refused: symlink {p.name} in "
+                                f"{sid}/config escapes extension directory"
+                            ),
+                        })
+                        return
+
+        install_config = (INSTALL_DIR / "config").resolve()
+        try:
+            install_config.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            json_response(self, 500, {"error": f"Failed to prepare config dir: {exc}"})
+            return
+
+        synced: list[str] = []
+        skipped: list[str] = []
+        lock = _service_locks[sid]
+        if not lock.acquire(blocking=False):
+            json_response(self, 409, {"error": f"Operation already in progress for {sid}"})
+            return
+        try:
+            for child in ext_config.iterdir():
+                target = (install_config / child.name).resolve()
+                # Path-traversal guard: target must stay under install_config.
+                if not target.is_relative_to(install_config):
+                    skipped.append(child.name)
+                    logger.warning(
+                        "Skipping config entry outside install dir: %s",
+                        child.name,
+                    )
+                    continue
+                try:
+                    if child.is_dir():
+                        shutil.copytree(
+                            str(child), str(target),
+                            dirs_exist_ok=True, symlinks=False,
+                        )
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(child), str(target))
+                    synced.append(child.name)
+                except OSError as exc:
+                    json_response(self, 500, {
+                        "error": f"Failed to copy {child.name}: {exc}",
+                    })
+                    return
+            # Mark .sh files executable in the synced service tree (if any).
+            svc_target = install_config / sid
+            if svc_target.is_dir():
+                for root, _dirs, files in os.walk(str(svc_target)):
+                    for fname in files:
+                        if fname.endswith(".sh"):
+                            fpath = Path(root) / fname
+                            try:
+                                fpath.chmod(
+                                    fpath.stat().st_mode
+                                    | stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH,
+                                )
+                            except OSError as exc:
+                                logger.warning("chmod +x failed for %s: %s", fpath, exc)
+        finally:
+            lock.release()
+
+        logger.info("synced config for extension %s (%d entries)", sid, len(synced))
+        json_response(self, 200, {
+            "status": "ok",
+            "service_id": sid,
+            "synced": synced,
+            "skipped": skipped,
+        })
 
     def _handle_logs(self):
         if not check_auth(self):
