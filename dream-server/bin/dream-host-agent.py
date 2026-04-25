@@ -352,6 +352,113 @@ def _write_progress(service_id: str, status: str, phase_label: str = "",
     os.rename(str(tmp_file), str(progress_file))
 
 
+def _read_progress_status(service_id: str) -> str | None:
+    """Return the ``status`` field of the progress file, or None if absent/unreadable.
+
+    Used by the enable-retry path to detect a prior failed install so the
+    host agent can re-run the post_install hook instead of silently calling
+    ``docker compose up`` against a half-configured service.
+    """
+    progress_file = DATA_DIR / "extension-progress" / f"{service_id}.json"
+    if not progress_file.exists():
+        return None
+    try:
+        data = json.loads(progress_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    status = data.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _enable_retry_work(service_id: str) -> None:
+    """Re-run post_install hook (if declared) then start the service.
+
+    Writes progress transitions (``starting`` → ``setup_hook`` → ``started``/
+    ``error``) so the dashboard UI can poll the state of an enable-retry.
+    """
+    try:
+        _write_progress(service_id, "starting", "Retrying after failure...")
+
+        ext_dir = _find_ext_dir(service_id)
+        if ext_dir is None:
+            _write_progress(service_id, "error", "Retry failed",
+                            error=f"Extension directory not found for {service_id}")
+            return
+
+        # Re-run the post_install hook when declared. Setup hooks are
+        # expected to be idempotent (check-then-create for secrets,
+        # env vars, data dirs) so re-running repopulates anything an
+        # earlier failed install may have left unset.
+        hook_path = _resolve_hook(ext_dir, "post_install")
+        if hook_path:
+            _write_progress(service_id, "setup_hook", "Running setup...")
+            manifest = _read_manifest(ext_dir)
+            service_def = manifest.get("service", {}) if manifest else {}
+            if not isinstance(service_def, dict):
+                service_def = {}
+            # Minimal allowlist env — mirror _handle_install (L1129-1138)
+            # to keep host-agent secrets out of extension scripts.
+            hook_env = {
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                "HOME": os.environ.get("HOME", ""),
+                "SERVICE_ID": service_id,
+                "SERVICE_PORT": str(service_def.get("port", 0)),
+                "SERVICE_DATA_DIR": str(DATA_DIR / service_id),
+                "DREAM_VERSION": DREAM_VERSION,
+                "GPU_BACKEND": GPU_BACKEND,
+                "HOOK_NAME": "post_install",
+            }
+            try:
+                hook_result = subprocess.run(
+                    ["bash", str(hook_path), str(INSTALL_DIR), GPU_BACKEND],
+                    cwd=str(ext_dir), env=hook_env,
+                    capture_output=True, text=True,
+                    timeout=SUBPROCESS_TIMEOUT_START,
+                )
+            except subprocess.TimeoutExpired:
+                _write_progress(service_id, "error", "Setup failed",
+                                error=f"post_install hook timed out ({SUBPROCESS_TIMEOUT_START}s)")
+                return
+            if hook_result.returncode != 0:
+                _write_progress(service_id, "error", "Setup failed",
+                                error=(hook_result.stderr or "")[:500])
+                return
+
+        _write_progress(service_id, "starting", "Starting container...")
+        ok, err = docker_compose_action(service_id, "start")
+        if not ok:
+            _write_progress(service_id, "error", "Start failed", error=err)
+            return
+        _write_progress(service_id, "started", "Service started")
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        logger.exception("Enable-retry failed for %s", service_id)
+        _write_progress(service_id, "error", "Retry failed",
+                        error=str(exc)[:500])
+
+
+def _start_enable_retry(handler, service_id: str, lock: threading.Lock) -> None:
+    """Dispatch the enable-retry worker on a daemon thread.
+
+    The caller must hold ``lock``; the thread releases it on exit. Sends
+    the 202 response before spawning the thread so the HTTP request
+    returns promptly (hook + compose start can take minutes).
+    """
+    def _thread_target() -> None:
+        try:
+            _enable_retry_work(service_id)
+        finally:
+            lock.release()
+
+    try:
+        json_response(handler, 202, {"status": "retrying",
+                                     "service_id": service_id,
+                                     "action": "start"})
+        threading.Thread(target=_thread_target, daemon=True).start()
+    except Exception:
+        lock.release()
+        raise
+
+
 def json_response(handler, code: int, body: dict):
     payload = json.dumps(body).encode("utf-8")
     handler.send_response(code)
@@ -822,6 +929,17 @@ class AgentHandler(BaseHTTPRequestHandler):
         if not lock.acquire(blocking=False):
             json_response(self, 409, {"error": f"Operation already in progress for {service_id}"})
             return
+
+        # Enable-retry path: if a prior install left progress status=error,
+        # "start" must re-run the post_install hook (if declared) and write
+        # progress updates — otherwise the UI stays stuck on the old error and
+        # env vars populated by the hook never get regenerated. Hook + start
+        # can take minutes, so mirror _handle_install's 202-accept-then-thread
+        # pattern. Non-retry start/stop keeps the existing synchronous path.
+        if action == "start" and _read_progress_status(service_id) == "error":
+            _start_enable_retry(self, service_id, lock)
+            return
+
         try:
             ok, err = docker_compose_action(service_id, action)
         except RuntimeError as exc:
