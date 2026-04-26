@@ -111,6 +111,7 @@ source "${LIB_DIR}/constants.sh"
 source "${LIB_DIR}/ui.sh"
 source "${LIB_DIR}/tier-map.sh"
 source "${LIB_DIR}/detection.sh"
+source "${LIB_DIR}/preflight-fs.sh"
 source "${LIB_DIR}/env-generator.sh"
 
 # ── File-local helpers ──
@@ -190,6 +191,39 @@ if ! $DOCKER_RUNNING; then
     exit 1
 fi
 ai_ok "Docker Desktop running (v${DOCKER_VERSION})"
+
+# Filesystem POSIX-permission check
+# The .env file (chmod 600) lives at INSTALL_DIR; a non-POSIX FS makes that
+# a silent no-op and leaks secrets. Block install before any directory
+# creation so the user can pick a different path.
+test_install_dir_filesystem "$INSTALL_DIR"
+info_box "Filesystem:" "${INSTALL_FS_TYPE}"
+if $INSTALL_FS_FATAL; then
+    ai_err "INSTALL_DIR (${INSTALL_DIR}) is on a ${INSTALL_FS_TYPE} filesystem."
+    ai_err "Dream Server requires a POSIX-permission filesystem (apfs/hfs) so .env"
+    ai_err "secrets can be locked down with chmod 600. ${INSTALL_FS_TYPE} silently"
+    ai_err "ignores chmod/chown, leaving secrets world-readable."
+    ai "Pick a path on your APFS system volume (e.g. ~/dream-server) and re-run."
+    exit 1
+fi
+ai_ok "Filesystem supports POSIX permissions"
+
+# Docker Desktop file-sharing allowlist check
+# Bind-mounts of paths outside the allowlist fail with cryptic OCI errors at
+# `docker compose up`. Probe with a throwaway container so we surface a clear
+# message before any compose work starts.
+test_docker_desktop_sharing "$INSTALL_DIR"
+if ! $DOCKER_SHARE_OK; then
+    ai_err "Docker Desktop cannot bind-mount ${INSTALL_DIR}."
+    ai_err "Add the path to Docker Desktop > Settings > Resources > File Sharing,"
+    ai_err "apply, then re-run this installer."
+    if [[ -n "$DOCKER_SHARE_ERR" ]]; then
+        ai "Probe output:"
+        printf '%s\n' "$DOCKER_SHARE_ERR" | sed 's/^/    /'
+    fi
+    exit 1
+fi
+ai_ok "Docker Desktop file sharing OK"
 
 # Disk space
 test_disk_space "$INSTALL_DIR" 30
