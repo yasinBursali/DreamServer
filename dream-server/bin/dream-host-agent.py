@@ -165,6 +165,65 @@ def resolve_compose_flags() -> list:
     return result.stdout.strip().split()
 
 
+# Filesystem types that silently ignore POSIX ownership/permissions.
+# Used by _precreate_data_dirs to skip os.chown when running on exFAT/FAT/NTFS-fuseblk
+# instead of raising a misleading PermissionError.
+_NON_POSIX_FS = frozenset({
+    "exfat", "msdos", "vfat", "fat", "fat32", "fat16",
+    "ntfs", "ntfs-3g", "fuseblk", "9p", "drvfs",
+    "ms-dos",
+})
+
+
+def _fs_type(path: Path) -> str | None:
+    """Return the lowercased filesystem type for ``path``, or ``None``.
+
+    Linux: walk /proc/self/mountinfo to find the longest matching mountpoint.
+    macOS / BSD: shell out to ``stat -f %T`` (Python's ``os.statvfs_result``
+    does not expose ``f_basetype``).
+    """
+    try:
+        target = str(Path(path).resolve())
+    except OSError:
+        return None
+
+    mountinfo = Path("/proc/self/mountinfo")
+    if mountinfo.exists():
+        try:
+            best_match = ""
+            best_fstype: str | None = None
+            with mountinfo.open("r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.split()
+                    if "-" not in parts:
+                        continue
+                    sep_idx = parts.index("-")
+                    if sep_idx + 1 >= len(parts) or sep_idx < 5:
+                        continue
+                    mountpoint = parts[4]
+                    fstype = parts[sep_idx + 1]
+                    if target == mountpoint or target.startswith(mountpoint.rstrip("/") + "/"):
+                        if len(mountpoint) >= len(best_match):
+                            best_match = mountpoint
+                            best_fstype = fstype
+            if best_fstype:
+                return best_fstype.lower()
+        except OSError:
+            pass
+
+    try:
+        result = subprocess.run(
+            ["stat", "-f", "%T", target],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip().lower()
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    return None
+
+
 def _precreate_data_dirs(service_id: str):
     """Pre-create data directories for an extension with correct ownership."""
     ext_dir = USER_EXTENSIONS_DIR / service_id
@@ -210,7 +269,20 @@ def _precreate_data_dirs(service_id: str):
                 try:
                     dir_path.mkdir(parents=True, exist_ok=True)
                     if uid is not None and os.getuid() == 0:
-                        os.chown(str(dir_path), uid, uid)
+                        # Defense-in-depth: the installer preflight already
+                        # blocks non-POSIX filesystems at INSTALL_DIR, but
+                        # runtime extension installs (post-setup) can still
+                        # land on a non-POSIX volume. chown there is a silent
+                        # no-op or raises EPERM/EOPNOTSUPP — skip cleanly.
+                        fs = _fs_type(dir_path)
+                        if fs in _NON_POSIX_FS:
+                            logger.warning(
+                                "Skipping chown for %s on non-POSIX filesystem %s "
+                                "(extension may not function correctly)",
+                                dir_path, fs,
+                            )
+                        else:
+                            os.chown(str(dir_path), uid, uid)
                 except OSError as e:
                     logger.warning("Failed to pre-create %s: %s", dir_path, e)
 
