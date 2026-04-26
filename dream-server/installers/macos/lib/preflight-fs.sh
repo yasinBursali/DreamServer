@@ -49,10 +49,16 @@ test_install_dir_filesystem() {
     # `stat -f %T` on macOS sometimes returns just a short tag; cross-check
     # with diskutil for stable personality identification.
     if command -v diskutil >/dev/null 2>&1; then
+        # `diskutil info` only accepts mount points or device IDs. Subpaths
+        # (e.g. /Volumes/X/dreamserver) make it exit non-zero, which under
+        # `set -euo pipefail` would silently kill the entire installer. The
+        # personality lookup is an optional refinement on top of `stat -f %T`,
+        # so swallow non-zero — empty personality just means we keep the stat
+        # value.
         local personality=""
         personality=$(diskutil info "$probe" 2>/dev/null \
             | awk -F': *' '/File System Personality/ {print $2; exit}' \
-            | tr '[:upper:]' '[:lower:]')
+            | tr '[:upper:]' '[:lower:]' || true)
         if [[ -n "$personality" ]]; then
             fs_type="$personality"
         fi
