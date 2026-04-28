@@ -108,6 +108,12 @@ BUNDLE_DIR="$(read_bundle_field bundle_dir)"
 ARCHIVE_PATH="$(read_bundle_field archive)"
 MANIFEST_PATH="$(read_bundle_field manifest)"
 
+if [[ "$BUNDLE_DIR" != *\\* ]] && [[ "$ARCHIVE_PATH" != *\\* ]]; then
+    pass "--json paths are POSIX-safe (no backslashes)"
+else
+    fail "--json paths contain backslashes — not portable across shells"
+fi
+
 if [[ -d "$BUNDLE_DIR" ]]; then
     pass "bundle directory is created"
 else

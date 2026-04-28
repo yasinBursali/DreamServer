@@ -535,9 +535,9 @@ bundle_dir = Path(sys.argv[1])
 archive_path = Path(sys.argv[2])
 manifest = bundle_dir / "manifest.json"
 payload = {
-    "bundle_dir": str(bundle_dir),
-    "archive": str(archive_path),
-    "manifest": str(manifest),
+    "bundle_dir": bundle_dir.as_posix(),
+    "archive": archive_path.as_posix(),
+    "manifest": manifest.as_posix(),
     "archive_exists": archive_path.exists(),
     "archive_size_bytes": archive_path.stat().st_size if archive_path.exists() else None,
 }
