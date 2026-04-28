@@ -121,11 +121,15 @@ jobs:
           fi
 
           # Positive assertion: a successful audit must have observed openclaw.json being
-          # written. If it's missing, the container probably crashed before the entrypoint
-          # got far enough to regenerate it — a silent crash-before-write would otherwise
-          # produce a false-green audit (empty bind-mount = no unexpected files = pass).
+          # written. If it's missing, the container exited before the entrypoint got
+          # far enough to regenerate it — and the empty bind-mount tells us nothing
+          # about openclaw's actual write paths. This is a write-observation gate, so
+          # a container that produces no observable writes is a hard failure, not a
+          # silent pass. Treating this as warning-only would let a future image bump
+          # that crashes on startup ship undetected.
           if [ ! -f ./openclaw-test-home/openclaw.json ]; then
-            echo "::warning::openclaw.json was never written — container likely crashed before regenerating it. Audit may be a false-green; check the container logs above."
+            echo "::error::openclaw.json was never written — container exited before producing the expected baseline write. The empty bind-mount makes this audit meaningless (false-green risk). Check the container logs above for the startup failure."
+            exit 1
           fi
 
           echo "openclaw filesystem writes match expected pattern (openclaw.json only)."
