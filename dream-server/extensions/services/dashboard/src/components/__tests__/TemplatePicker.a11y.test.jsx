@@ -61,14 +61,18 @@ describe('TemplatePicker accessibility', () => {
     ]
     const { container } = render(<TemplatePicker templates={templates} />)
 
-    const svgs = container.querySelectorAll('svg')
-    expect(svgs.length).toBeGreaterThan(0)
-    // Status icons all sit inside the icon wrapper div with rounded-lg
-    // class — we don't enforce that selector here, but every Lucide icon
-    // rendered by the picker passes aria-hidden="true" so the assertion
-    // can simply scan all SVGs.
-    svgs.forEach(svg => {
-      expect(svg).toHaveAttribute('aria-hidden', 'true')
+    // Scope the assertion to status icons specifically — the wrapper div with
+    // the `p-2 rounded-lg` background badge is what holds the Loader2 /
+    // AlertTriangle / Check / default Icon. Other SVGs in the card (e.g. the
+    // HardDrive disk-size glyph) are out of scope for this status-icon test.
+    const statusIconWrappers = container.querySelectorAll('div.rounded-lg')
+    expect(statusIconWrappers.length).toBe(templates.length)
+    statusIconWrappers.forEach(wrapper => {
+      const svgs = wrapper.querySelectorAll('svg')
+      expect(svgs.length).toBe(1)
+      svgs.forEach(svg => {
+        expect(svg).toHaveAttribute('aria-hidden', 'true')
+      })
     })
   })
 

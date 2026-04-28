@@ -85,34 +85,48 @@ async function navigateToStep6() {
   await act(async () => fireEvent.click(screen.getByRole('button', { name: /^Next$/ })))
 }
 
-describe('SetupWizard diagnostics sentinel parser', () => {
-  beforeEach(() => {
-    // Default fetch: any call to /api/templates or /api/extensions/catalog
-    // during navigation through step 2 should fail-soft (template fetch
-    // already handles non-ok). /api/setup/test is overridden per-test.
-    vi.stubGlobal('fetch', vi.fn((url) => {
-      if (typeof url === 'string' && url.startsWith('/api/templates')) {
-        return Promise.resolve({ ok: false, json: () => Promise.resolve({}) })
-      }
-      if (typeof url === 'string' && url.startsWith('/api/extensions')) {
-        return Promise.resolve({ ok: false, json: () => Promise.resolve({}) })
-      }
-      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
-    }))
+/**
+ * Build a URL-dispatched fetch mock. Step 2 of the wizard fetches
+ * `/api/templates` and `/api/extensions/catalog` BEFORE the diagnostic
+ * stream POST, so a one-shot `mockImplementationOnce` would be consumed
+ * by the wrong call. Routing by URL is the only stable pattern here.
+ *
+ * `setupHandler(url, opts)` is the per-test override that handles
+ * `POST /api/setup/test`. Everything else falls through to the default
+ * fail-soft handlers for templates/extensions and an empty-OK default.
+ */
+function makeFetchMock(setupHandler) {
+  return vi.fn((url, opts) => {
+    if (typeof url === 'string' && url.startsWith('/api/setup/test')) {
+      return setupHandler(url, opts)
+    }
+    if (typeof url === 'string' && url.startsWith('/api/templates')) {
+      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) })
+    }
+    if (typeof url === 'string' && url.startsWith('/api/extensions')) {
+      return Promise.resolve({ ok: false, json: () => Promise.resolve({}) })
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
   })
+}
 
+function stubFetchWithSetupStream(chunks) {
+  vi.stubGlobal('fetch', makeFetchMock(() =>
+    Promise.resolve(mockStreamResponse(chunks))
+  ))
+}
+
+describe('SetupWizard diagnostics sentinel parser', () => {
   afterEach(() => {
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
 
   test('PASS sentinel marks the run successful', async () => {
-    fetch.mockImplementationOnce(() => Promise.resolve(
-      mockStreamResponse([
-        'foo\n',
-        '__DREAM_RESULT__:PASS:0\n'
-      ])
-    ))
+    stubFetchWithSetupStream([
+      'foo\n',
+      '__DREAM_RESULT__:PASS:0\n'
+    ])
 
     render(<SetupWizard onComplete={() => {}} />)
     await navigateToStep6()
@@ -128,12 +142,10 @@ describe('SetupWizard diagnostics sentinel parser', () => {
   })
 
   test('FAIL sentinel marks the run as failed and surfaces the failure UI', async () => {
-    fetch.mockImplementationOnce(() => Promise.resolve(
-      mockStreamResponse([
-        'bar\n',
-        '__DREAM_RESULT__:FAIL:3\n'
-      ])
-    ))
+    stubFetchWithSetupStream([
+      'bar\n',
+      '__DREAM_RESULT__:FAIL:3\n'
+    ])
 
     render(<SetupWizard onComplete={() => {}} />)
     await navigateToStep6()
@@ -149,12 +161,10 @@ describe('SetupWizard diagnostics sentinel parser', () => {
   })
 
   test('falls back to "All tests passed!" trailer when sentinel missing (older backend)', async () => {
-    fetch.mockImplementationOnce(() => Promise.resolve(
-      mockStreamResponse([
-        'starting...\n',
-        'All tests passed!\n'
-      ])
-    ))
+    stubFetchWithSetupStream([
+      'starting...\n',
+      'All tests passed!\n'
+    ])
 
     render(<SetupWizard onComplete={() => {}} />)
     await navigateToStep6()
@@ -167,12 +177,10 @@ describe('SetupWizard diagnostics sentinel parser', () => {
   })
 
   test('defaults to failure when neither sentinel nor "All tests passed" appears', async () => {
-    fetch.mockImplementationOnce(() => Promise.resolve(
-      mockStreamResponse([
-        'doing something\n',
-        'partial output\n'
-      ])
-    ))
+    stubFetchWithSetupStream([
+      'doing something\n',
+      'partial output\n'
+    ])
 
     render(<SetupWizard onComplete={() => {}} />)
     await navigateToStep6()
@@ -185,12 +193,10 @@ describe('SetupWizard diagnostics sentinel parser', () => {
   })
 
   test('sentinel split across two chunks still parses', async () => {
-    fetch.mockImplementationOnce(() => Promise.resolve(
-      mockStreamResponse([
-        'output line\n__DREAM_RESULT__:PA',
-        'SS:0\n'
-      ])
-    ))
+    stubFetchWithSetupStream([
+      'output line\n__DREAM_RESULT__:PA',
+      'SS:0\n'
+    ])
 
     render(<SetupWizard onComplete={() => {}} />)
     await navigateToStep6()
@@ -205,10 +211,10 @@ describe('SetupWizard diagnostics sentinel parser', () => {
 
   test('unmount aborts the in-flight diagnostic fetch', async () => {
     let capturedSignal = null
-    fetch.mockImplementationOnce((_url, opts) => {
+    vi.stubGlobal('fetch', makeFetchMock((_url, opts) => {
       capturedSignal = opts?.signal ?? null
       return Promise.resolve(mockNeverResolvingResponse(opts.signal))
-    })
+    }))
 
     const { unmount } = render(<SetupWizard onComplete={() => {}} />)
     await navigateToStep6()
