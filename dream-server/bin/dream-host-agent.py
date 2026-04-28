@@ -911,6 +911,9 @@ class AgentHandler(BaseHTTPRequestHandler):
         # Iterating dirs + files (not just files) closes the symlinked-directory
         # gap: os.walk(followlinks=False) does NOT recurse into symlinked dirs,
         # so they only ever surface in the parent's `dirs` list.
+        # The walk covers the WHOLE config/ tree (including out-of-scope
+        # siblings) — a symlink anywhere is treated as tampering, even if the
+        # contract restriction below means we wouldn't have copied it anyway.
         if ext_config.is_symlink():
             json_response(self, 400, {
                 "error": (
@@ -930,6 +933,44 @@ class AgentHandler(BaseHTTPRequestHandler):
                     })
                     return
 
+        # Default copy contract: an extension may only write to its OWN
+        # config tree — `<ext>/config/<service_id>/` → `INSTALL_DIR/config/<service_id>/`.
+        # Anything else under `<ext>/config/` (e.g. `<ext>/config/open-webui/`,
+        # `<ext>/config/litellm/`) is silently ignored — copying those would let
+        # a user extension overwrite installer-managed core configs or another
+        # extension's config tree. Cross-service writes are not part of the
+        # default contract; if a legitimate use case ever surfaces, an explicit
+        # manifest allowlist field is the right escape hatch (out of scope here).
+        src_svc = ext_config / sid
+
+        # Inventory siblings so the response can audit what was ignored.
+        out_of_scope: list[str] = []
+        for child in ext_config.iterdir():
+            if child.name != sid:
+                out_of_scope.append(child.name)
+                logger.info(
+                    "ignoring out-of-scope config entry %s/config/%s "
+                    "(default contract: only %s/config/%s/ is synced)",
+                    sid, child.name, sid, sid,
+                )
+
+        # If the extension ships no `config/<sid>/` at all, no-op.
+        if not src_svc.exists():
+            json_response(self, 200, {
+                "status": "ok",
+                "service_id": sid,
+                "synced": [],
+                "skipped": out_of_scope,
+            })
+            return
+        if not src_svc.is_dir():
+            json_response(self, 400, {
+                "error": (
+                    f"config sync refused: {sid}/config/{sid} must be a directory"
+                ),
+            })
+            return
+
         install_config = (INSTALL_DIR / "config").resolve()
         try:
             install_config.mkdir(parents=True, exist_ok=True)
@@ -937,61 +978,57 @@ class AgentHandler(BaseHTTPRequestHandler):
             json_response(self, 500, {"error": f"Failed to prepare config dir: {exc}"})
             return
 
+        target = (install_config / sid).resolve()
+        # Path-traversal guard: target must stay under install_config. Always true
+        # because sid is validated against SERVICE_ID_RE above (no slashes / dots),
+        # but kept as defense-in-depth in case the regex ever loosens.
+        if not target.is_relative_to(install_config):
+            json_response(self, 400, {
+                "error": f"config sync refused: target outside install dir for {sid}",
+            })
+            return
+
         synced: list[str] = []
-        skipped: list[str] = []
         lock = _service_locks[sid]
         if not lock.acquire(blocking=False):
             json_response(self, 409, {"error": f"Operation already in progress for {sid}"})
             return
         try:
-            for child in ext_config.iterdir():
-                target = (install_config / child.name).resolve()
-                # Path-traversal guard: target must stay under install_config.
-                if not target.is_relative_to(install_config):
-                    skipped.append(child.name)
-                    logger.warning(
-                        "Skipping config entry outside install dir: %s",
-                        child.name,
-                    )
-                    continue
-                try:
-                    if child.is_dir():
-                        shutil.copytree(
-                            str(child), str(target),
-                            dirs_exist_ok=True, symlinks=False,
-                        )
-                    else:
-                        target.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(str(child), str(target))
-                    synced.append(child.name)
-                except OSError as exc:
-                    json_response(self, 500, {
-                        "error": f"Failed to copy {child.name}: {exc}",
-                    })
-                    return
-            # Mark .sh files executable in the synced service tree (if any).
-            svc_target = install_config / sid
-            if svc_target.is_dir():
-                for root, _dirs, files in os.walk(str(svc_target)):
-                    for fname in files:
-                        if fname.endswith(".sh"):
-                            fpath = Path(root) / fname
-                            try:
-                                fpath.chmod(
-                                    fpath.stat().st_mode
-                                    | stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH,
-                                )
-                            except OSError as exc:
-                                logger.warning("chmod +x failed for %s: %s", fpath, exc)
+            try:
+                shutil.copytree(
+                    str(src_svc), str(target),
+                    dirs_exist_ok=True, symlinks=False,
+                )
+                synced.append(sid)
+            except OSError as exc:
+                json_response(self, 500, {
+                    "error": f"Failed to copy {sid}/config/{sid}: {exc}",
+                })
+                return
+            # Mark .sh files executable in the synced service tree.
+            for root, _dirs, files in os.walk(str(target)):
+                for fname in files:
+                    if fname.endswith(".sh"):
+                        fpath = Path(root) / fname
+                        try:
+                            fpath.chmod(
+                                fpath.stat().st_mode
+                                | stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH,
+                            )
+                        except OSError as exc:
+                            logger.warning("chmod +x failed for %s: %s", fpath, exc)
         finally:
             lock.release()
 
-        logger.info("synced config for extension %s (%d entries)", sid, len(synced))
+        logger.info(
+            "synced config for extension %s (%d in-scope, %d out-of-scope ignored)",
+            sid, len(synced), len(out_of_scope),
+        )
         json_response(self, 200, {
             "status": "ok",
             "service_id": sid,
             "synced": synced,
-            "skipped": skipped,
+            "skipped": out_of_scope,
         })
 
     def _handle_logs(self):

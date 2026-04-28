@@ -554,6 +554,85 @@ class TestSyncExtensionConfigWire:
             server.server_close()
             thread.join(timeout=2)
 
+    def test_default_contract_only_copies_own_service_subdir(
+        self, tmp_path, monkeypatch,
+    ):
+        """Strict regression for the audit-flagged copy-contract weakness.
+
+        An extension shipping `<ext>/config/open-webui/` (or any other
+        sibling directory) must NOT have that tree copied into
+        `INSTALL_DIR/config/open-webui/` — that would let an extension
+        overwrite installer-managed core-service config (open-webui,
+        litellm, etc.) or another extension's config tree.
+
+        Default contract: only `<ext>/config/<service_id>/` is synced.
+        Sibling entries are logged as out-of-scope and reported in the
+        response's `skipped` array, but never written to INSTALL_DIR.
+        """
+        import threading
+        from http.server import HTTPServer
+
+        install_dir = tmp_path / "install"
+        user_root = install_dir / "data" / "user-extensions"
+        install_dir.mkdir()
+        user_root.mkdir(parents=True)
+
+        # Build a malicious-shape extension: `evil-ext` that ships its OWN
+        # legitimate config subdir AND tries to overwrite open-webui's.
+        ext = user_root / "evil-ext"
+        own = ext / "config" / "evil-ext"
+        own.mkdir(parents=True)
+        (own / "settings.yaml").write_text("ok: true\n", encoding="utf-8")
+
+        clobber_target = ext / "config" / "open-webui"
+        clobber_target.mkdir(parents=True)
+        (clobber_target / "config.json").write_text(
+            "OVERWRITTEN", encoding="utf-8",
+        )
+        # Also a file directly under config/ (not in any subdir), proving the
+        # contract restriction applies to file siblings too.
+        (ext / "config" / "stray.txt").write_text("stray", encoding="utf-8")
+
+        # Pre-create open-webui core config so the test can prove byte-for-byte
+        # that it was NOT touched by the sync call.
+        existing_owui = install_dir / "config" / "open-webui"
+        existing_owui.mkdir(parents=True)
+        (existing_owui / "config.json").write_text(
+            "ORIGINAL", encoding="utf-8",
+        )
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", tmp_path / "builtin-empty")
+        monkeypatch.setattr(_mod, "AGENT_API_KEY", "wire-test-secret")
+
+        server = HTTPServer(("127.0.0.1", 0), _mod.AgentHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, body = self._post(port, "evil-ext")
+            assert status == 200
+            # In-scope copy succeeded.
+            assert body.get("synced") == ["evil-ext"]
+            assert (install_dir / "config" / "evil-ext" / "settings.yaml").read_text(
+                encoding="utf-8",
+            ) == "ok: true\n"
+            # Out-of-scope entries reported (order not guaranteed).
+            skipped = set(body.get("skipped", []))
+            assert "open-webui" in skipped
+            assert "stray.txt" in skipped
+            # Crucially: open-webui core config remains BYTE-FOR-BYTE untouched.
+            assert (existing_owui / "config.json").read_text(
+                encoding="utf-8",
+            ) == "ORIGINAL"
+            # The malicious overwrite payload did NOT escape into INSTALL_DIR.
+            assert not (install_dir / "config" / "stray.txt").exists()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
 
 class TestInvalidateComposeCache:
 
