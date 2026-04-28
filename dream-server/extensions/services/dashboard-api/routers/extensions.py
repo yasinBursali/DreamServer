@@ -386,21 +386,26 @@ def _scan_compose_content(
         # Built-ins (e.g. docker-compose.nvidia.yml) legitimately request
         # NVIDIA devices via deploy.resources.reservations.devices, so the
         # caller passes skip_gpu_passthrough_check=True for those.
+        #
+        # Each level checked with isinstance: a malformed compose like
+        # `deploy: { resources: null }` or `resources: { reservations: null }`
+        # would otherwise AttributeError on .get() and surface as a 500
+        # instead of a clean scanner pass-through (no GPU request → no block).
         if not skip_gpu_passthrough_check:
-            deploy = svc_def.get("deploy") or {}
-            reservations = (
-                deploy.get("resources", {}).get("reservations", {})
-                if isinstance(deploy, dict) else {}
-            )
-            if isinstance(reservations, dict) and reservations.get("devices"):
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Extension rejected: GPU passthrough via "
-                        f"deploy.resources.reservations.devices is not "
-                        f"permitted in user extensions ({svc_name})"
-                    ),
-                )
+            deploy = svc_def.get("deploy")
+            if isinstance(deploy, dict):
+                resources = deploy.get("resources")
+                if isinstance(resources, dict):
+                    reservations = resources.get("reservations")
+                    if isinstance(reservations, dict) and reservations.get("devices"):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Extension rejected: GPU passthrough via "
+                                f"deploy.resources.reservations.devices is not "
+                                f"permitted in user extensions ({svc_name})"
+                            ),
+                        )
         ports = svc_def.get("ports", [])
         for port in ports:
             if isinstance(port, dict):

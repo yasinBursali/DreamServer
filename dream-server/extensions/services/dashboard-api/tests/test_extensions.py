@@ -1353,6 +1353,50 @@ class TestScanComposeSkipGpuPassthroughCheck:
         # Should not raise
         _scan_compose_content(compose, skip_gpu_passthrough_check=True)
 
+    def test_handles_null_resources_without_500(self, tmp_path):
+        """Malformed compose with `deploy: { resources: null }` must NOT raise
+        AttributeError (which would surface as a 500). The scanner should
+        treat null sub-dicts as "no GPU request" and pass through cleanly.
+        Regression for the audit-flagged case where chained .get() returns
+        None and breaks the next .get() call.
+        """
+        from routers.extensions import _scan_compose_content
+        compose = tmp_path / "compose.yaml"
+        compose.write_text(
+            "services:\n  svc:\n    image: test\n"
+            "    deploy:\n"
+            "      resources: null\n"
+        )
+        # Should not raise — no GPU request can be expressed via null resources.
+        _scan_compose_content(compose)
+
+    def test_handles_null_reservations_without_500(self, tmp_path):
+        """Same shape one level deeper: `resources: { reservations: null }`.
+        Without the isinstance guard at each level, the chained .get() would
+        AttributeError on None and surface as a 500.
+        """
+        from routers.extensions import _scan_compose_content
+        compose = tmp_path / "compose.yaml"
+        compose.write_text(
+            "services:\n  svc:\n    image: test\n"
+            "    deploy:\n"
+            "      resources:\n"
+            "        reservations: null\n"
+        )
+        # Should not raise.
+        _scan_compose_content(compose)
+
+    def test_handles_null_deploy_without_500(self, tmp_path):
+        """And one level shallower: `deploy: null`. Same reasoning."""
+        from routers.extensions import _scan_compose_content
+        compose = tmp_path / "compose.yaml"
+        compose.write_text(
+            "services:\n  svc:\n    image: test\n"
+            "    deploy: null\n"
+        )
+        # Should not raise.
+        _scan_compose_content(compose)
+
 
 # --- Size quota enforcement ---
 
