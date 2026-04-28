@@ -125,6 +125,43 @@ else
     fail "default mode output changed: '$default_text'"
 fi
 
+# 5. End-to-end: an extension whose own directory name contains a
+#    space produces a relative compose path with a literal space, and
+#    that path survives the NUL round-trip as a single token.
+EXT_NAME="space ext"
+mkdir -p "$SCRIPT_DIR_WITH_SPACE/extensions/services/$EXT_NAME"
+cat > "$SCRIPT_DIR_WITH_SPACE/extensions/services/$EXT_NAME/manifest.json" <<EOF
+{
+  "schema_version": "dream.services.v1",
+  "service": {
+    "id": "space-ext",
+    "compose_file": "compose.yaml",
+    "gpu_backends": ["all"]
+  }
+}
+EOF
+touch "$SCRIPT_DIR_WITH_SPACE/extensions/services/$EXT_NAME/compose.yaml"
+
+ext_arr=()
+while IFS= read -r -d '' tok; do
+    ext_arr+=("$tok")
+done < <("$RESOLVER" --script-dir "$SCRIPT_DIR_WITH_SPACE" \
+    --tier 1 --gpu-backend nvidia --null)
+
+# Find the token that points at the space-ext compose file. It should
+# be exactly one element with the literal space preserved.
+expected_path="extensions/services/$EXT_NAME/compose.yaml"
+match_count=0
+for t in "${ext_arr[@]}"; do
+    [[ "$t" == "$expected_path" ]] && match_count=$((match_count + 1))
+done
+
+if [[ "$match_count" -eq 1 ]]; then
+    pass "extension dir with space round-trips as a single token: '$expected_path'"
+else
+    fail "expected exactly one token '$expected_path', got $match_count matches in [${ext_arr[*]}]"
+fi
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]
