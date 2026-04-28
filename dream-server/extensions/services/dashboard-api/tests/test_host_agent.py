@@ -659,29 +659,34 @@ class TestNarrowedComposeSetResolves:
 
 
 class TestInstallPullFallsBackOnUnresolvedNarrow:
-    """End-to-end source assertion: the install handler must call the
-    validator and fall back to full flags when the narrowed set drops
-    a referenced service.
+    """Source-level wire-up checks for the install pull fallback.
+
+    These tests assert only that `_handle_install` *references* the
+    helpers and contains the fallback assignment token; behavioural
+    correctness of the narrow filter and the validator is covered by
+    `TestNarrowInstallPullFlags` and `TestNarrowedComposeSetResolves`
+    above. The token-presence pattern matches the established
+    `TestInstallStartCommandNoDeps` convention in this file.
     """
 
-    def test_install_uses_narrowed_validator(self):
+    def test_install_references_narrow_helpers(self):
         import inspect
         src = inspect.getsource(_mod.AgentHandler._handle_install)
         assert "_narrowed_compose_set_resolves" in src, (
-            "_handle_install must validate the narrowed compose set "
-            "via _narrowed_compose_set_resolves before running pull"
+            "_handle_install source must reference _narrowed_compose_set_resolves"
         )
         assert "_narrow_install_pull_flags" in src, (
-            "_handle_install must use _narrow_install_pull_flags helper"
+            "_handle_install source must reference _narrow_install_pull_flags"
         )
 
-    def test_install_falls_back_to_full_flags(self):
+    def test_install_source_contains_full_flags_fallback_token(self):
         import inspect
         src = inspect.getsource(_mod.AgentHandler._handle_install)
-        # Fall-back path must assign full flags when narrow validation fails.
+        # Token-only check: confirms a `pull_flags = flags` assignment
+        # exists somewhere in the handler. Does not verify control flow.
         assert "pull_flags = flags" in src, (
-            "_handle_install must fall back to full flags when the "
-            "narrowed compose set fails to resolve"
+            "_handle_install source must contain a `pull_flags = flags` "
+            "assignment (the fallback token)"
         )
 
 

@@ -1290,8 +1290,11 @@ class AgentHandler(BaseHTTPRequestHandler):
                 # set with `config --services` first; if it doesn't
                 # resolve, fall back to the full flag set.
                 narrowed = _narrow_install_pull_flags(flags, service_id)
+                # 30s mirrors `resolve_compose_flags`: `config --services`
+                # is essentially instant when Docker is healthy; a long
+                # timeout just delays detection of a hung daemon.
                 if narrowed != flags and _narrowed_compose_set_resolves(
-                    narrowed, service_id, str(INSTALL_DIR), SUBPROCESS_TIMEOUT_START,
+                    narrowed, service_id, str(INSTALL_DIR), 30,
                 ):
                     pull_flags = narrowed
                 else:
