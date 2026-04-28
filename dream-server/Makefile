@@ -33,6 +33,9 @@ test: ## Run unit and contract tests
 	@echo "=== Overlay/plist contracts ==="
 	@bash tests/contracts/test-overlay-map-coherence.sh
 	@bash tests/contracts/test-plist-log-paths.sh
+	@echo ""
+	@echo "=== dream list --json clean-stdout regression ==="
+	@bash tests/test-dream-list-json-clean-stdout.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="
