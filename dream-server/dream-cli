@@ -640,15 +640,18 @@ cmd_status() {
             awk -F', ' '{printf "  %s: %s%% GPU | %sMB/%sMB VRAM | %s°C\n", $1, $2, $3, $4, $5}'
     fi
 
-    # Bootstrap status
+    # Bootstrap status. The bootstrap-status.json file may be mid-write
+    # or partially populated, so the inner pipelines tolerate a missing
+    # field (`|| true`) under the pipefail flag added in this PR — a
+    # mid-write read MUST NOT abort `dream status`.
     local bootstrap_file="$INSTALL_DIR/data/bootstrap-status.json"
     if [[ -f "$bootstrap_file" ]]; then
         local bs_status
-        bs_status=$(grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$bootstrap_file" | sed -n '1p' | sed 's/.*"status"[[:space:]]*:[[:space:]]*"//' | sed 's/"//')
+        bs_status=$(grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$bootstrap_file" | sed -n '1p' | sed 's/.*"status"[[:space:]]*:[[:space:]]*"//' | sed 's/"//' || true)
         if [[ "$bs_status" == "downloading" || "$bs_status" == "starting" || "$bs_status" == "verifying" ]]; then
             local bs_model bs_percent
-            bs_model=$(grep -o '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$bootstrap_file" | sed -n '1p' | sed 's/.*"model"[[:space:]]*:[[:space:]]*"//' | sed 's/"//')
-            bs_percent=$(grep -o '"percent"[[:space:]]*:[[:space:]]*[0-9.]*' "$bootstrap_file" | sed -n '1p' | sed 's/.*:[[:space:]]*//')
+            bs_model=$(grep -o '"model"[[:space:]]*:[[:space:]]*"[^"]*"' "$bootstrap_file" | sed -n '1p' | sed 's/.*"model"[[:space:]]*:[[:space:]]*"//' | sed 's/"//' || true)
+            bs_percent=$(grep -o '"percent"[[:space:]]*:[[:space:]]*[0-9.]*' "$bootstrap_file" | sed -n '1p' | sed 's/.*:[[:space:]]*//' || true)
             log ""
             log "  Model Upgrade: $bs_model (${bs_percent:-?}% downloaded)"
         fi
@@ -1272,8 +1275,11 @@ cmd_chat() {
 
     local _content
     _content=$(printf '%s' "$_resp" | jq -er '.choices[0].message.content') || {
+        # `|| true` tolerates jq exit 5 (unparseable JSON) under pipefail
+        # so we reach the friendly error() instead of aborting silently.
+        # `${_err:-unparseable response}` already handles the empty case.
         local _err
-        _err=$(printf '%s' "$_resp" | jq -r '.error.message // "unknown error"' 2>/dev/null)
+        _err=$(printf '%s' "$_resp" | jq -r '.error.message // "unknown error"' 2>/dev/null || true)
         error "LLM error: ${_err:-unparseable response}"
     }
 
@@ -1948,8 +1954,11 @@ META
                 pname=$(basename "$dir")
                 local created="" backend=""
                 if [[ -f "$dir/meta.txt" ]]; then
-                    created=$(grep "^created=" "$dir/meta.txt" 2>/dev/null | cut -d= -f2 | cut -dT -f1)
-                    backend=$(grep "^gpu_backend=" "$dir/meta.txt" 2>/dev/null | cut -d= -f2)
+                    # Tolerate missing fields (`|| true`) under pipefail —
+                    # a malformed meta.txt must not abort the listing of
+                    # subsequent presets.
+                    created=$(grep "^created=" "$dir/meta.txt" 2>/dev/null | cut -d= -f2 | cut -dT -f1 || true)
+                    backend=$(grep "^gpu_backend=" "$dir/meta.txt" 2>/dev/null | cut -d= -f2 || true)
                 fi
                 printf "  %-20s %-22s %-10s\n" "$pname" "${created:-unknown}" "${backend:-unknown}"
             done
