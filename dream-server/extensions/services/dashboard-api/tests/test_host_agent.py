@@ -650,9 +650,28 @@ class TestInstallRunningStateVerification:
         assert 'state == "running"' in src
 
     def test_install_writes_error_when_state_not_running(self):
-        """Failed state-poll must surface as progress error, not 'started'."""
+        """Failed state-poll must surface as progress error, not 'started'.
+
+        The error message is built via f-string with the
+        manifest-driven `startup_timeout` rather than the literal "15s",
+        so we assert the constant prefix and the timeout reference, not
+        a hardcoded duration.
+        """
         src = self._install_source()
-        # The error path must come before (or instead of) the success write.
-        assert "did not reach running state within 15s" in src
         # Error path uses the existing _write_progress("error", ...) API.
         assert '_write_progress(service_id, "error"' in src
+        # Error message template carries the dynamic startup_timeout.
+        assert "did not reach running state within" in src
+        assert "{startup_timeout}s" in src
+
+    def test_install_supports_startup_check_opt_out(self):
+        """One-shot / setup-only extensions can set
+        `service.startup_check: false` in their manifest to skip the
+        running-state poll. The install completes after `compose up -d`
+        returns 0; the inspect loop is gated on `if startup_check:`.
+        """
+        src = self._install_source()
+        # Manifest field is read with True default for back-compat.
+        assert 'startup_check = install_service_def.get("startup_check", True)' in src
+        # The state-poll loop is conditionally entered.
+        assert "if startup_check:" in src

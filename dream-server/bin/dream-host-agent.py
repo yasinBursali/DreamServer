@@ -1252,37 +1252,46 @@ class AgentHandler(BaseHTTPRequestHandler):
                     install_service_def = {}
                 container_name = install_service_def.get("container_name") or f"dream-{service_id}"
 
-                # Per-extension startup deadline; manifests with heavy init
-                # (postgres, clickhouse, JVM-based services) can override the
-                # 15s default via service.startup_timeout.
-                startup_timeout = install_service_def.get("startup_timeout", 15)
-                deadline = time.monotonic() + startup_timeout
-                state: str | None = None
-                state_error = ""
-                while time.monotonic() < deadline:
-                    try:
-                        inspect_result = subprocess.run(
-                            ["docker", "inspect", "--format",
-                             "{{.State.Status}}|{{.State.Error}}", container_name],
-                            capture_output=True, text=True, timeout=5,
-                        )
-                    except subprocess.TimeoutExpired:
-                        inspect_result = None
-                    if inspect_result is not None and inspect_result.returncode == 0:
-                        parts = inspect_result.stdout.strip().split("|", 1)
-                        state = parts[0] if parts else ""
-                        state_error = parts[1] if len(parts) > 1 else ""
-                        if state == "running":
-                            break
-                    time.sleep(1)
+                # Manifest-driven opt-out for one-shot / setup-only extensions
+                # whose containers intentionally exit (init containers,
+                # extensions whose value is purely the setup_hook). Setting
+                # `service.startup_check: false` skips the running-state poll
+                # — compose up's clean exit is taken as success. Default is
+                # True so existing long-running services are unchanged.
+                startup_check = install_service_def.get("startup_check", True)
 
-                if state != "running":
-                    msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
-                    if state_error:
-                        msg += f": {state_error}"
-                    _write_progress(service_id, "error", "Installation failed",
-                                    error=msg)
-                    return
+                if startup_check:
+                    # Per-extension startup deadline; manifests with heavy init
+                    # (postgres, clickhouse, JVM-based services) can override the
+                    # 15s default via service.startup_timeout.
+                    startup_timeout = install_service_def.get("startup_timeout", 15)
+                    deadline = time.monotonic() + startup_timeout
+                    state: str | None = None
+                    state_error = ""
+                    while time.monotonic() < deadline:
+                        try:
+                            inspect_result = subprocess.run(
+                                ["docker", "inspect", "--format",
+                                 "{{.State.Status}}|{{.State.Error}}", container_name],
+                                capture_output=True, text=True, timeout=5,
+                            )
+                        except subprocess.TimeoutExpired:
+                            inspect_result = None
+                        if inspect_result is not None and inspect_result.returncode == 0:
+                            parts = inspect_result.stdout.strip().split("|", 1)
+                            state = parts[0] if parts else ""
+                            state_error = parts[1] if len(parts) > 1 else ""
+                            if state == "running":
+                                break
+                        time.sleep(1)
+
+                    if state != "running":
+                        msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
+                        if state_error:
+                            msg += f": {state_error}"
+                        _write_progress(service_id, "error", "Installation failed",
+                                        error=msg)
+                        return
 
                 # Step 4: Success
                 _write_progress(service_id, "started", "Service started")
