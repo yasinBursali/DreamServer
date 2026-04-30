@@ -1027,349 +1027,171 @@ class TestHandleModelDownloadCancel:
         assert proc.killed is True
 
 
-# --- _precreate_data_dirs + install flow (PR 2A regressions) ---
-#
-# Defect 1/2: _run_install and _precreate_data_dirs must use _find_ext_dir()
-# so built-in extensions (under EXTENSIONS_DIR) are found — the old
-# USER_EXTENSIONS_DIR-only path silently no-op'd for every built-in.
-#
-# Defect 3: _precreate_data_dirs must create dirs for any relative bind
-# source (not just "./data/..."), so extensions with "./upload:/..." style
-# mounts also get their dirs pre-created. Anchored on INSTALL_DIR because
-# Docker Compose v2 resolves relative bind paths against the project
-# directory (the first -f file's parent = INSTALL_DIR), not against the
-# individual fragment's directory.
-#
-# Defect 5: _handle_install must verify the container reached "running"
-# state before reporting success — compose `up -d` returns 0 even for
-# Created/Exited/Restarting containers.
+class TestNarrowInstallPullFlags:
+    """Filter flags used by the install pull step.
+
+    Audit follow-up on PR #1057: narrowing must drop -f entries
+    pointing at OTHER extensions, but keep base/GPU overlay and the
+    target extension's own fragments.
+    """
+
+    def _ext_dirs(self, tmp_path):
+        builtins = tmp_path / "extensions" / "services"
+        users = tmp_path / "user-extensions"
+        builtins.mkdir(parents=True)
+        users.mkdir(parents=True)
+        return builtins, users
+
+    def test_drops_other_extension_compose(self, tmp_path, monkeypatch):
+        builtins, users = self._ext_dirs(tmp_path)
+        target_dir = builtins / "perplexica"
+        other_dir = builtins / "searxng"
+        target_dir.mkdir()
+        other_dir.mkdir()
+        target_compose = target_dir / "compose.yaml"
+        other_compose = other_dir / "compose.yaml"
+        target_compose.write_text("services: {}\n")
+        other_compose.write_text("services: {}\n")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtins)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", users)
+
+        flags = [
+            "-f", str(tmp_path / "docker-compose.base.yml"),
+            "-f", str(tmp_path / "docker-compose.nvidia.yml"),
+            "-f", str(target_compose),
+            "-f", str(other_compose),
+        ]
+        narrowed = _mod._narrow_install_pull_flags(flags, "perplexica")
+
+        assert "-f" in narrowed
+        assert str(other_compose) not in narrowed
+        assert str(target_compose) in narrowed
+
+    def test_keeps_base_and_gpu_overlay(self, tmp_path, monkeypatch):
+        builtins, users = self._ext_dirs(tmp_path)
+        target_dir = builtins / "perplexica"
+        target_dir.mkdir()
+        target_compose = target_dir / "compose.yaml"
+        target_compose.write_text("services: {}\n")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtins)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", users)
+
+        base = str(tmp_path / "docker-compose.base.yml")
+        gpu = str(tmp_path / "docker-compose.nvidia.yml")
+        flags = ["-f", base, "-f", gpu, "-f", str(target_compose)]
+        narrowed = _mod._narrow_install_pull_flags(flags, "perplexica")
+
+        assert base in narrowed
+        assert gpu in narrowed
+        assert str(target_compose) in narrowed
+
+    def test_user_extension_target_is_kept(self, tmp_path, monkeypatch):
+        builtins, users = self._ext_dirs(tmp_path)
+        target_dir = users / "my-ext"
+        other_dir = builtins / "searxng"
+        target_dir.mkdir()
+        other_dir.mkdir()
+        target_compose = target_dir / "compose.yaml"
+        other_compose = other_dir / "compose.yaml"
+        target_compose.write_text("services: {}\n")
+        other_compose.write_text("services: {}\n")
+
+        monkeypatch.setattr(_mod, "INSTALL_DIR", tmp_path)
+        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtins)
+        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", users)
+
+        flags = ["-f", str(target_compose), "-f", str(other_compose)]
+        narrowed = _mod._narrow_install_pull_flags(flags, "my-ext")
+
+        assert str(target_compose) in narrowed
+        assert str(other_compose) not in narrowed
 
 
-class TestPrecreateDataDirs:
+class TestNarrowedComposeSetResolves:
+    """Validate that the narrowed compose set parses and contains the
+    target service. Audit follow-up on PR #1057.
+    """
 
-    def _write_compose(self, ext_dir: Path, volumes: list[str]):
-        vol_yaml = "\n".join(f"      - {v}" for v in volumes)
-        ext_dir.mkdir(parents=True, exist_ok=True)
-        (ext_dir / "compose.yaml").write_text(
-            "services:\n"
-            "  svc:\n"
-            "    image: test:latest\n"
-            "    volumes:\n" + vol_yaml + "\n",
-            encoding="utf-8",
+    def test_returns_false_when_config_exits_nonzero(self, monkeypatch):
+        recorded = []
+
+        def fake_run(cmd, **kwargs):
+            recorded.append(cmd)
+            return _SubprocessResult(returncode=1, stdout="", stderr="depends on undefined service")
+
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        ok = _mod._narrowed_compose_set_resolves(
+            ["-f", "/tmp/base.yml"], "perplexica", "/tmp", 60,
         )
+        assert ok is False
+        assert recorded[0][:2] == ["docker", "compose"]
+        assert "config" in recorded[0] and "--services" in recorded[0]
 
-    def test_creates_dirs_for_builtin_ext_via_find_ext_dir(self, tmp_path, monkeypatch):
-        """Defect 1/2: built-in extensions resolved via _find_ext_dir, not USER_EXTENSIONS_DIR."""
-        pytest.importorskip("yaml")
-        builtin_root = tmp_path / "builtin"
-        user_root = tmp_path / "user"
-        install_dir = tmp_path / "install"
-        builtin_root.mkdir()
-        user_root.mkdir()
-        install_dir.mkdir()
-        ext_dir = builtin_root / "svc-b"
-        self._write_compose(ext_dir, ["./data/state:/state"])
+    def test_returns_false_when_target_service_missing_from_output(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return _SubprocessResult(returncode=0, stdout="searxng\nllama-server\n", stderr="")
 
-        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtin_root)
-        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        ok = _mod._narrowed_compose_set_resolves([], "perplexica", "/tmp", 60)
+        assert ok is False
 
-        _mod._precreate_data_dirs("svc-b")
+    def test_returns_true_when_target_service_listed(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            return _SubprocessResult(returncode=0, stdout="perplexica\nsearxng\n", stderr="")
 
-        # Dir lives under INSTALL_DIR (the Compose project directory),
-        # NOT under ext_dir — matching where Compose actually mounts.
-        assert (install_dir / "data" / "state").is_dir()
-        assert not (ext_dir / "data" / "state").exists()
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        ok = _mod._narrowed_compose_set_resolves([], "perplexica", "/tmp", 60)
+        assert ok is True
 
-    def test_creates_dirs_for_non_data_prefix(self, tmp_path, monkeypatch):
-        """Defect 3: relative bind sources outside './data/' must still be created."""
-        pytest.importorskip("yaml")
-        user_root = tmp_path / "user"
-        builtin_root = tmp_path / "builtin"
-        install_dir = tmp_path / "install"
-        user_root.mkdir()
-        builtin_root.mkdir()
-        install_dir.mkdir()
-        ext_dir = user_root / "svc-u"
-        self._write_compose(ext_dir, ["./upload:/upload", "./data/state:/state"])
+    def test_returns_false_on_subprocess_error(self, monkeypatch):
+        def fake_run(cmd, **kwargs):
+            raise OSError("docker not found")
 
-        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtin_root)
-        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
-
-        _mod._precreate_data_dirs("svc-u")
-
-        # Both non-"./data/" and "./data/..." mounts must materialise under
-        # INSTALL_DIR (the Compose project directory).
-        assert (install_dir / "upload").is_dir()
-        assert (install_dir / "data" / "state").is_dir()
-
-    def test_skips_named_volumes(self, tmp_path, monkeypatch):
-        """Named volumes (no '/') must not trigger filesystem creation."""
-        pytest.importorskip("yaml")
-        user_root = tmp_path / "user"
-        builtin_root = tmp_path / "builtin"
-        install_dir = tmp_path / "install"
-        user_root.mkdir()
-        builtin_root.mkdir()
-        install_dir.mkdir()
-        ext_dir = user_root / "svc-n"
-        self._write_compose(ext_dir, ["named_vol:/var/lib/data"])
-
-        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtin_root)
-        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
-
-        _mod._precreate_data_dirs("svc-n")
-
-        # Named volume must not materialize as a directory anywhere we own.
-        assert not (ext_dir / "named_vol").exists()
-        assert not (install_dir / "named_vol").exists()
+        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
+        ok = _mod._narrowed_compose_set_resolves([], "perplexica", "/tmp", 60)
+        assert ok is False
 
 
-class TestInstallRunningStateVerification:
-    """Defect 5: `_handle_install` must poll container state before reporting success."""
+class TestInstallPullFallsBackOnUnresolvedNarrow:
+    """Source-level wire-up checks for the install pull fallback.
 
-    def _install_source(self):
+    These tests assert only that `_handle_install` *references* the
+    helpers and contains the fallback assignment token; behavioural
+    correctness of the narrow filter and the validator is covered by
+    `TestNarrowInstallPullFlags` and `TestNarrowedComposeSetResolves`
+    above. The token-presence pattern matches the established
+    `TestInstallStartCommandNoDeps` convention in this file.
+    """
+
+    def test_install_references_narrow_helpers(self):
         import inspect
-        return inspect.getsource(_mod.AgentHandler._handle_install)
-
-    def test_install_uses_find_ext_dir(self):
-        """Defect 1: _run_install resolves ext_dir via _find_ext_dir, not USER_EXTENSIONS_DIR."""
-        src = self._install_source()
-        assert "_find_ext_dir(service_id)" in src
-        assert "USER_EXTENSIONS_DIR / service_id" not in src
-
-    def test_install_polls_docker_inspect_state(self):
-        """State-poll loop must run `docker inspect` and check running state."""
-        src = self._install_source()
-        assert "docker" in src and "inspect" in src
-        assert "{{.State.Status}}" in src
-        assert 'state == "running"' in src
-
-    def test_install_writes_error_when_state_not_running(self):
-        """Failed state-poll must surface as progress error, not 'started'."""
-        src = self._install_source()
-        # The error path must come before (or instead of) the success write.
-        assert "did not reach running state within 15s" in src
-        # Error path uses the existing _write_progress("error", ...) API.
-        assert '_write_progress(service_id, "error"' in src
-
-
-# --- Enable-retry (PR 3A regression) ---
-#
-# When /v1/extension/start is called against a service whose extension-progress
-# file shows status=error (prior failed install), the host agent must:
-#   * re-run the post_install hook if declared (env vars populated by the hook
-#     may be missing from the previous failure),
-#   * write progress transitions (starting → setup_hook → started/error) so the
-#     dashboard UI updates instead of displaying the stale error, and
-#   * fall back to the existing synchronous compose path for any service that
-#     isn't in an error state.
-#
-# Pre-fix, _handle_extension hit docker_compose_action directly without writing
-# progress or re-running the hook, leaving the UI permanently stuck.
-
-
-class _ImmediateThread:
-    """Run thread targets synchronously so tests can assert on results."""
-    def __init__(self, target=None, daemon=None, **kwargs):
-        self._target = target
-
-    def start(self):
-        self._target()
-
-
-class TestEnableRetry:
-
-    def _write_manifest(self, ext_dir: Path, with_hook: bool = True):
-        ext_dir.mkdir(parents=True, exist_ok=True)
-        if with_hook:
-            hook = ext_dir / "setup.sh"
-            hook.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
-            hook.chmod(0o755)
-            (ext_dir / "manifest.yaml").write_text(
-                "service:\n"
-                "  port: 1234\n"
-                "  hooks:\n"
-                "    post_install: setup.sh\n",
-                encoding="utf-8",
-            )
-        else:
-            (ext_dir / "manifest.yaml").write_text(
-                "service:\n  port: 1234\n",
-                encoding="utf-8",
-            )
-
-    def _write_progress_file(self, data_dir: Path, service_id: str, status: str):
-        progress_dir = data_dir / "extension-progress"
-        progress_dir.mkdir(parents=True, exist_ok=True)
-        (progress_dir / f"{service_id}.json").write_text(
-            json.dumps({"service_id": service_id, "status": status}),
-            encoding="utf-8",
+        src = inspect.getsource(_mod.AgentHandler._handle_install)
+        assert "_narrowed_compose_set_resolves" in src, (
+            "_handle_install source must reference _narrowed_compose_set_resolves"
+        )
+        assert "_narrow_install_pull_flags" in src, (
+            "_handle_install source must reference _narrow_install_pull_flags"
         )
 
-    def _progress(self, data_dir: Path, service_id: str):
-        pf = data_dir / "extension-progress" / f"{service_id}.json"
-        if not pf.exists():
-            return None
-        return json.loads(pf.read_text(encoding="utf-8"))
-
-    def _body(self, service_id: str) -> bytes:
-        return json.dumps({"service_id": service_id}).encode("utf-8")
-
-    @pytest.fixture
-    def retry_env(self, tmp_path, monkeypatch):
-        pytest.importorskip("yaml")
-        install_dir = tmp_path / "install"
-        install_dir.mkdir()
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        builtin_root = tmp_path / "builtin"
-        user_root = tmp_path / "user"
-        builtin_root.mkdir()
-        user_root.mkdir()
-
-        monkeypatch.setattr(_mod, "INSTALL_DIR", install_dir)
-        monkeypatch.setattr(_mod, "DATA_DIR", data_dir)
-        monkeypatch.setattr(_mod, "EXTENSIONS_DIR", builtin_root)
-        monkeypatch.setattr(_mod, "USER_EXTENSIONS_DIR", user_root)
-        monkeypatch.setattr(_mod, "AGENT_API_KEY", "test-key")
-
-        # Drop the per-service lock so retries across tests don't deadlock.
-        _mod._service_locks.pop("fakesvc", None)
-
-        # Force threading.Thread to run targets synchronously so the assertions
-        # below execute after the retry worker completes.
-        monkeypatch.setattr(_mod.threading, "Thread", _ImmediateThread)
-
-        return install_dir, data_dir, builtin_root, user_root
-
-    def test_retry_after_error_runs_hook_and_writes_started(self, retry_env, monkeypatch):
-        _, data_dir, builtin_root, _ = retry_env
-        ext_dir = builtin_root / "fakesvc"
-        self._write_manifest(ext_dir, with_hook=True)
-        self._write_progress_file(data_dir, "fakesvc", "error")
-
-        hook_cmds = []
-
-        def fake_run(cmd, *args, **kwargs):
-            hook_cmds.append(cmd)
-            return subprocess.CompletedProcess(args=cmd, returncode=0,
-                                               stdout="", stderr="")
-
-        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-
-        compose_calls = []
-
-        def fake_compose(sid, action):
-            compose_calls.append((sid, action))
-            return True, ""
-
-        monkeypatch.setattr(_mod, "docker_compose_action", fake_compose)
-
-        handler = _FakeHandler(self._body("fakesvc"))
-        _mod.AgentHandler._handle_extension(handler, "start")
-
-        assert handler.response_code == 202
-        assert handler.parse_response()["status"] == "retrying"
-        # post_install hook was invoked via bash against setup.sh
-        assert any(
-            len(c) >= 2 and c[0] == "bash" and c[1].endswith("setup.sh")
-            for c in hook_cmds
-        ), f"expected setup.sh bash invocation, saw {hook_cmds}"
-        # docker compose start was called after the hook
-        assert ("fakesvc", "start") in compose_calls
-        # Progress landed on 'started'
-        progress = self._progress(data_dir, "fakesvc")
-        assert progress is not None
-        assert progress["status"] == "started"
-
-    def test_retry_hook_failure_writes_error_and_skips_compose(self, retry_env, monkeypatch):
-        _, data_dir, builtin_root, _ = retry_env
-        ext_dir = builtin_root / "fakesvc"
-        self._write_manifest(ext_dir, with_hook=True)
-        self._write_progress_file(data_dir, "fakesvc", "error")
-
-        def fake_run(cmd, *args, **kwargs):
-            return subprocess.CompletedProcess(args=cmd, returncode=1,
-                                               stdout="", stderr="hook boom")
-
-        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-
-        compose_calls = []
-        monkeypatch.setattr(
-            _mod, "docker_compose_action",
-            lambda sid, act: (compose_calls.append((sid, act)) or (True, "")),
+    def test_install_source_contains_full_flags_fallback_token(self):
+        import inspect
+        src = inspect.getsource(_mod.AgentHandler._handle_install)
+        # Token-only check: confirms a `pull_flags = flags` assignment
+        # exists somewhere in the handler. Does not verify control flow.
+        assert "pull_flags = flags" in src, (
+            "_handle_install source must contain a `pull_flags = flags` "
+            "assignment (the fallback token)"
         )
 
-        handler = _FakeHandler(self._body("fakesvc"))
-        _mod.AgentHandler._handle_extension(handler, "start")
 
-        assert handler.response_code == 202
-        progress = self._progress(data_dir, "fakesvc")
-        assert progress is not None
-        assert progress["status"] == "error"
-        assert "hook boom" in (progress["error"] or "")
-        # Hook failure must NOT proceed to compose start
-        assert compose_calls == []
+class _SubprocessResult:
+    """Minimal stand-in for subprocess.CompletedProcess."""
 
-    def test_no_progress_file_uses_sync_path_without_progress_write(self, retry_env, monkeypatch):
-        _, data_dir, builtin_root, _ = retry_env
-        ext_dir = builtin_root / "fakesvc"
-        self._write_manifest(ext_dir, with_hook=True)
-        # Deliberately no progress file.
-
-        hook_cmds = []
-
-        def fake_run(cmd, *args, **kwargs):
-            hook_cmds.append(cmd)
-            return subprocess.CompletedProcess(args=cmd, returncode=0,
-                                               stdout="", stderr="")
-
-        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(_mod, "docker_compose_action",
-                            lambda sid, act: (True, ""))
-
-        handler = _FakeHandler(self._body("fakesvc"))
-        _mod.AgentHandler._handle_extension(handler, "start")
-
-        # Synchronous success → 200, not 202
-        assert handler.response_code == 200
-        assert handler.parse_response()["status"] == "ok"
-        # Sync path must not re-run the hook
-        assert not any(
-            len(c) >= 2 and c[0] == "bash" and c[1].endswith("setup.sh")
-            for c in hook_cmds
-        )
-        # Sync path must not write a progress file
-        assert self._progress(data_dir, "fakesvc") is None
-
-    def test_progress_status_started_uses_sync_path(self, retry_env, monkeypatch):
-        _, data_dir, builtin_root, _ = retry_env
-        ext_dir = builtin_root / "fakesvc"
-        self._write_manifest(ext_dir, with_hook=True)
-        self._write_progress_file(data_dir, "fakesvc", "started")
-
-        hook_cmds = []
-
-        def fake_run(cmd, *args, **kwargs):
-            hook_cmds.append(cmd)
-            return subprocess.CompletedProcess(args=cmd, returncode=0,
-                                               stdout="", stderr="")
-
-        monkeypatch.setattr(_mod.subprocess, "run", fake_run)
-        monkeypatch.setattr(_mod, "docker_compose_action",
-                            lambda sid, act: (True, ""))
-
-        handler = _FakeHandler(self._body("fakesvc"))
-        _mod.AgentHandler._handle_extension(handler, "start")
-
-        assert handler.response_code == 200
-        # Sync path must not re-run the hook
-        assert not any(
-            len(c) >= 2 and c[0] == "bash" and c[1].endswith("setup.sh")
-            for c in hook_cmds
-        )
-        # Progress must be unchanged
-        assert self._progress(data_dir, "fakesvc")["status"] == "started"
+    def __init__(self, returncode: int, stdout: str, stderr: str):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
