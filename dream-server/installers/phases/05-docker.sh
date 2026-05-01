@@ -354,12 +354,15 @@ if [[ $GPU_COUNT -gt 0 && "$GPU_BACKEND" == "nvidia" ]]; then
     else
         ai "Installing NVIDIA Container Toolkit..."
         if ! $DRY_RUN; then
-            # Add NVIDIA GPG key (used by apt and as trust anchor)
-            curl -fsSL --max-time 60 https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 2>/dev/null || true
-
             # Distro-aware repo setup + install
             case "$PKG_MANAGER" in
                 apt)
+                    # Add NVIDIA GPG key (apt's signed-by trust anchor for the toolkit repo)
+                    curl -fsSL --max-time 60 https://nvidia.github.io/libnvidia-container/gpgkey | \
+                        sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+                    if [[ ! -s /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg ]]; then
+                        error "NVIDIA Container Toolkit keyring download failed (empty or missing /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg). Check network connectivity to nvidia.github.io."
+                    fi
                     curl -s -L --max-time 60 https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
                         sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
                         sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
