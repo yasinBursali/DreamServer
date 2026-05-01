@@ -325,10 +325,13 @@ async def trigger_update(action: UpdateAction, background_tasks: BackgroundTasks
             raise HTTPException(status_code=500, detail="Backup failed")
     elif action.action == "update":
         async def run_update():
-            proc = await asyncio.create_subprocess_exec(
-                str(script_path), "update",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    str(script_path), "update",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+            except OSError:
+                logger.exception("update task failed")
         background_tasks.add_task(run_update)
         return {"success": True, "message": "Update started in background. Check logs for progress."}
