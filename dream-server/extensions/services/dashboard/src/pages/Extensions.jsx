@@ -57,6 +57,7 @@ const friendlyError = (detail) => {
 
 const STATUS_STYLES = {
   enabled:       'bg-green-500/20 text-green-400',
+  cli_installed: 'bg-green-500/20 text-green-400',
   stopped:       'bg-red-500/20 text-red-400',
   unhealthy:     'bg-amber-500/20 text-amber-400',
   disabled:      'bg-theme-border text-theme-text-muted',
@@ -69,6 +70,7 @@ const STATUS_STYLES = {
 
 const STATUS_DESCRIPTIONS = {
   enabled:       'Service is running and healthy',
+  cli_installed: 'CLI tool installed \u2014 invoke via `docker compose run --rm <service>`',
   disabled:      'Installed but turned off \u2014 won\u2019t start on restart',
   stopped:       'Enabled but container is not running',
   unhealthy:     'Container is running but health check is failing \u2014 check logs',
@@ -127,20 +129,25 @@ export default function Extensions() {
           fetchCatalog()
         } else if (data.status === 'started') {
           // Container is up but healthcheck may not have passed yet.
-          // Refresh catalog — if it shows "enabled", we're done.
+          // Refresh catalog — if it shows "enabled" (long-running service)
+          // or "cli_installed" (one-shot CLI tool whose container exits
+          // after init), we're done.
           const catRes = await fetchJson('/api/extensions/catalog')
           if (!catRes.ok) return
           const catData = await catRes.json()
           setCatalog(catData)
           const ext = catData.extensions?.find(e => e.id === serviceId)
-          if (ext && ext.status === 'enabled') {
+          if (ext && (ext.status === 'enabled' || ext.status === 'cli_installed')) {
             clearInterval(activePollers.current[serviceId])
             delete activePollers.current[serviceId]
             delete consecutiveFailuresRef.current[serviceId]
-            setToast({ type: 'success', text: `Extension installed and started.` })
+            const successText = ext.status === 'cli_installed'
+              ? `${ext.name || 'Extension'} installed — run via \`docker compose run --rm ${serviceId}\`.`
+              : 'Extension installed and started.'
+            setToast({ type: 'success', text: successText })
             setProgressMap(prev => { const next = { ...prev }; delete next[serviceId]; return next })
           }
-          // If not yet "enabled", keep polling — healthcheck still running
+          // If not yet "enabled" / "cli_installed", keep polling — healthcheck still running
         }
       } catch (err) {
         // Dashboard-api may be mid-restart, or the browser briefly lost
@@ -623,7 +630,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
   const isError = status === 'error'
   const isStopped = status === 'stopped'
   const isUnhealthy = status === 'unhealthy'
-  const isToggleable = isUserExt && (status === 'enabled' || status === 'disabled' || status === 'error' || status === 'stopped' || status === 'unhealthy')
+  const isToggleable = isUserExt && (status === 'enabled' || status === 'cli_installed' || status === 'disabled' || status === 'error' || status === 'stopped' || status === 'unhealthy')
   const showRemove = isUserExt && (status === 'disabled' || isError)
   const showInstall = status === 'not_installed' && ext.installable
 
@@ -636,7 +643,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
         <div className="flex items-start justify-between mb-2">
           <div className="flex items-center gap-2.5">
             <div className={`p-1.5 rounded-lg ${
-              status === 'enabled' ? 'bg-green-500/10' :
+              (status === 'enabled' || status === 'cli_installed') ? 'bg-green-500/10' :
               status === 'stopped' ? 'bg-red-500/10' :
               status === 'unhealthy' ? 'bg-amber-500/10' :
               status === 'incompatible' ? 'bg-orange-500/10' :
@@ -645,7 +652,7 @@ function ExtensionCard({ ext, gpuBackend, agentAvailable, onDetails, onConsole, 
               'bg-theme-bg border border-theme-border/30'
             }`}>
               <Icon size={16} className={
-                status === 'enabled' ? 'text-green-400' :
+                (status === 'enabled' || status === 'cli_installed') ? 'text-green-400' :
                 status === 'stopped' ? 'text-red-400' :
                 status === 'unhealthy' ? 'text-amber-400' :
                 status === 'incompatible' ? 'text-orange-400' :
