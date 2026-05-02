@@ -1,7 +1,7 @@
 #!/bin/bash
 # memory-shepherd.sh — Periodic memory baseline reset for LLM agents
 # Usage: memory-shepherd.sh [agent-name|all]
-set -uo pipefail
+set -euo pipefail
 
 TIMESTAMP=$(date '+%Y-%m-%d_%H%M')
 LOCKFILE=/tmp/memory-shepherd.lock
