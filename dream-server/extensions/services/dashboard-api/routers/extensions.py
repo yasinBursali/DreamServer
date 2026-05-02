@@ -1120,10 +1120,83 @@ def _install_from_library(service_id: str) -> None:
         staged_compose = staged / "compose.yaml"
         if staged_compose.exists():
             _scan_compose_content(staged_compose, trusted=True)
+            # Rewrite build.context to the absolute final extension dir.
+            # Compose resolves relative contexts against the project dir
+            # (INSTALL_DIR), not the extension dir, so "context: ." would
+            # look for the Dockerfile in INSTALL_DIR/Dockerfile and fail.
+            _rewrite_build_context(staged_compose, dest.resolve())
         os.rename(str(staged), str(dest))
     finally:
         if Path(tmpdir).exists():
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _rewrite_build_context(compose_path: Path, final_dir: Path) -> None:
+    """Rewrite build.context in a staged compose.yaml to an absolute path.
+
+    Library extensions ship `build: { context: ., ... }` so they're portable
+    inside the library, but `docker compose` resolves relative contexts
+    against the compose project directory (INSTALL_DIR), not the extension's
+    own directory. After staging, rewrite each service's build.context to
+    the absolute path of the final post-rename extension directory.
+
+    Idempotent: absolute paths are left alone (in case the compose was
+    already rewritten on a previous attempt).
+    """
+    with open(compose_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if not isinstance(data, dict):
+        return
+
+    services = data.get("services")
+    if not isinstance(services, dict):
+        return
+
+    final_dir_str = str(final_dir)
+    changed = False
+
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        build = service.get("build")
+        if build is None:
+            continue
+
+        if isinstance(build, str):
+            # Short-form `build: <path>` — normalize to dict form
+            if os.path.isabs(build):
+                continue
+            service["build"] = {"context": final_dir_str}
+            logger.info(
+                "Rewrote build context for service '%s' from '%s' to '%s'",
+                service_name, build, final_dir_str,
+            )
+            changed = True
+            continue
+
+        if isinstance(build, dict):
+            context = build.get("context")
+            if context is None:
+                # Compose default is `.`; make it explicit and absolute
+                build["context"] = final_dir_str
+                logger.info(
+                    "Set build context for service '%s' to '%s' (was implicit)",
+                    service_name, final_dir_str,
+                )
+                changed = True
+                continue
+            if isinstance(context, str) and not os.path.isabs(context):
+                build["context"] = final_dir_str
+                logger.info(
+                    "Rewrote build context for service '%s' from '%s' to '%s'",
+                    service_name, context, final_dir_str,
+                )
+                changed = True
+
+    if changed:
+        with open(compose_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(data, f, sort_keys=False)
 
 
 @router.post("/api/extensions/{service_id}/install")
