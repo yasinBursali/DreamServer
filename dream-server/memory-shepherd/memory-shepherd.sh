@@ -1,7 +1,7 @@
 #!/bin/bash
 # memory-shepherd.sh — Periodic memory baseline reset for LLM agents
 # Usage: memory-shepherd.sh [agent-name|all]
-set -uo pipefail
+set -euo pipefail
 
 # Cross-platform stat helpers — BSD (Darwin) / GNU diverge on -c vs -f
 _stat_mtime() {
