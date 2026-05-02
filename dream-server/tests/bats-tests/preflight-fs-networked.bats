@@ -126,6 +126,27 @@ _extract_linux_fs_fn() {
     assert_output --partial "EXIT_OK"
 }
 
+@test "linux preflight: nfs4 warns and does not exit fatally" {
+    _make_gnu_stat_stub "nfs4"
+    local fn_file="$BATS_TEST_TMPDIR/fs-fn.sh"
+    _extract_linux_fs_fn "$fn_file"
+
+    run bash -c '
+        export PATH="'"$STUB_BIN:$PATH"'"
+        export INSTALL_DIR="'"$INSTALL_DIR"'"
+        log()   { :; }
+        warn()  { echo "WARN: $1"; }
+        error() { echo "ERROR: $1"; exit 1; }
+        source "'"$fn_file"'"
+        check_install_dir_filesystem
+        echo "EXIT_OK"
+    '
+    assert_success
+    assert_output --partial "networked filesystem"
+    assert_output --partial "nfs4"
+    assert_output --partial "EXIT_OK"
+}
+
 # ---------------------------------------------------------------------------
 # Linux: native POSIX filesystems must NOT warn or fatally exit.
 # ---------------------------------------------------------------------------
