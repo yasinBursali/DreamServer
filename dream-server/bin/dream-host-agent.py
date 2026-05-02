@@ -1788,8 +1788,8 @@ class AgentHandler(BaseHTTPRequestHandler):
                 lock.release()
 
         try:
-            json_response(self, 202, {"status": "accepted", "service_id": service_id, "action": "install"})
             threading.Thread(target=_run_install, daemon=True).start()
+            json_response(self, 202, {"status": "accepted", "service_id": service_id, "action": "install"})
         except Exception:
             lock.release()
             raise
