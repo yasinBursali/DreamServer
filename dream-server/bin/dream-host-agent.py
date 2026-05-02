@@ -469,6 +469,146 @@ def _write_progress(service_id: str, status: str, phase_label: str = "",
     os.rename(str(tmp_file), str(progress_file))
 
 
+def _read_progress_status(service_id: str) -> str | None:
+    """Return the ``status`` field of the progress file, or None if absent/unreadable.
+
+    Used by the enable-retry path to detect a prior failed install so the
+    host agent can re-run the post_install hook instead of silently calling
+    ``docker compose up`` against a half-configured service.
+    """
+    progress_file = DATA_DIR / "extension-progress" / f"{service_id}.json"
+    if not progress_file.exists():
+        return None
+    try:
+        data = json.loads(progress_file.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    status = data.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _run_post_install_hook(service_id: str, ext_dir: Path) -> tuple[bool, str]:
+    """Run an extension's ``post_install`` hook with sandboxed env.
+
+    Shared between the install path (``_handle_install._run_install``) and
+    the enable-retry path (``_enable_retry_work``) so both write the same
+    progress transitions and use the same env allowlist.
+
+    Returns ``(ok, error_message)``:
+    - ``(True, "")`` when no hook is declared OR the hook completes with
+      exit code 0. The caller continues with its own next progress write.
+    - ``(False, msg)`` when the hook times out or exits non-zero. The
+      helper has already written an ``error`` progress entry; the caller
+      should abort and NOT overwrite progress.
+
+    Progress writes:
+    - ``setup_hook`` ("Running setup...") only when a hook is actually
+      resolved — callers must NOT pre-write this message, otherwise the
+      "Running setup..." status appears for extensions with no hook.
+    - ``error`` on timeout / non-zero exit.
+    - On success the helper writes nothing further; the caller proceeds.
+
+    The 8-key env allowlist mirrors ``_execute_hook`` (L1488-1498) to
+    keep host-agent secrets out of extension scripts. Stderr is sliced
+    tail-500 so the actionable end of the output reaches the dashboard.
+    """
+    hook_path = _resolve_hook(ext_dir, "post_install")
+    if not hook_path:
+        return (True, "")
+
+    _write_progress(service_id, "setup_hook", "Running setup...")
+    manifest = _read_manifest(ext_dir)
+    service_def = manifest.get("service", {}) if manifest else {}
+    if not isinstance(service_def, dict):
+        service_def = {}
+    hook_env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", ""),
+        "SERVICE_ID": service_id,
+        "SERVICE_PORT": str(service_def.get("port", 0)),
+        "SERVICE_DATA_DIR": str(DATA_DIR / service_id),
+        "DREAM_VERSION": DREAM_VERSION,
+        "GPU_BACKEND": GPU_BACKEND,
+        "HOOK_NAME": "post_install",
+    }
+    try:
+        result = subprocess.run(
+            ["bash", str(hook_path), str(INSTALL_DIR), GPU_BACKEND],
+            cwd=str(ext_dir), env=hook_env,
+            capture_output=True, text=True,
+            timeout=SUBPROCESS_TIMEOUT_START,
+        )
+    except subprocess.TimeoutExpired:
+        msg = f"post_install hook timed out ({SUBPROCESS_TIMEOUT_START}s)"
+        _write_progress(service_id, "error", "Setup failed", error=msg)
+        return (False, msg)
+
+    if result.returncode != 0:
+        msg = (result.stderr or "")[-500:]
+        _write_progress(service_id, "error", "Setup failed", error=msg)
+        return (False, msg)
+
+    return (True, "")
+
+
+def _enable_retry_work(service_id: str) -> None:
+    """Re-run post_install hook (if declared) then start the service.
+
+    Writes progress transitions (``starting`` → ``setup_hook`` → ``started``/
+    ``error``) so the dashboard UI can poll the state of an enable-retry.
+    """
+    try:
+        _write_progress(service_id, "starting", "Retrying after failure...")
+
+        ext_dir = _find_ext_dir(service_id)
+        if ext_dir is None:
+            _write_progress(service_id, "error", "Retry failed",
+                            error=f"Extension directory not found for {service_id}")
+            return
+
+        # Re-run the post_install hook when declared. Setup hooks are
+        # expected to be idempotent (check-then-create for secrets,
+        # env vars, data dirs) so re-running repopulates anything an
+        # earlier failed install may have left unset.
+        ok, _ = _run_post_install_hook(service_id, ext_dir)
+        if not ok:
+            return
+
+        _write_progress(service_id, "starting", "Starting container...")
+        ok, err = docker_compose_action(service_id, "start")
+        if not ok:
+            _write_progress(service_id, "error", "Start failed", error=err)
+            return
+        _write_progress(service_id, "started", "Service started")
+    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+        logger.exception("Enable-retry failed for %s", service_id)
+        _write_progress(service_id, "error", "Retry failed",
+                        error=str(exc)[:500])
+
+
+def _start_enable_retry(handler, service_id: str, lock: threading.Lock) -> None:
+    """Dispatch the enable-retry worker on a daemon thread.
+
+    The caller must hold ``lock``; the thread releases it on exit. Sends
+    the 202 response before spawning the thread so the HTTP request
+    returns promptly (hook + compose start can take minutes).
+    """
+    def _thread_target() -> None:
+        try:
+            _enable_retry_work(service_id)
+        finally:
+            lock.release()
+
+    try:
+        json_response(handler, 202, {"status": "retrying",
+                                     "service_id": service_id,
+                                     "action": "start"})
+        threading.Thread(target=_thread_target, daemon=True).start()
+    except Exception:
+        lock.release()
+        raise
+
+
 def json_response(handler, code: int, body: dict):
     payload = json.dumps(body).encode("utf-8")
     handler.send_response(code)
@@ -1003,6 +1143,17 @@ class AgentHandler(BaseHTTPRequestHandler):
         if not lock.acquire(blocking=False):
             json_response(self, 409, {"error": f"Operation already in progress for {service_id}"})
             return
+
+        # Enable-retry path: if a prior install left progress status=error,
+        # "start" must re-run the post_install hook (if declared) and write
+        # progress updates — otherwise the UI stays stuck on the old error and
+        # env vars populated by the hook never get regenerated. Hook + start
+        # can take minutes, so mirror _handle_install's 202-accept-then-thread
+        # pattern. Non-retry start/stop keeps the existing synchronous path.
+        if action == "start" and _read_progress_status(service_id) == "error":
+            _start_enable_retry(self, service_id, lock)
+            return
+
         try:
             ok, err = docker_compose_action(service_id, action)
         except RuntimeError as exc:
@@ -1487,7 +1638,10 @@ class AgentHandler(BaseHTTPRequestHandler):
                                     error=f"Extension directory not found for {service_id}")
                     return
 
-                # Step 1: Setup hook (if requested)
+                # Step 1: Setup hook (if requested). The helper is a no-op
+                # when no hook is declared — it does not pre-write any
+                # "Running setup..." progress, so extensions without a hook
+                # don't show a misleading setup phase in the dashboard.
                 if run_setup_hook:
                     _write_progress(service_id, "setup_hook", "Running setup...")
                     hook_path = _resolve_hook(ext_dir, "post_install")
@@ -1547,6 +1701,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                         )
                     pull_flags = flags
 
+
                 _write_progress(service_id, "pulling", "Downloading image...")
                 pull_result = subprocess.run(
                     ["docker", "compose"] + pull_flags + ["pull", service_id],
@@ -1570,60 +1725,42 @@ class AgentHandler(BaseHTTPRequestHandler):
                                     error=start_result.stderr[-500:])
                     return
 
-                # By default, poll for running state: compose `up -d`
-                # returns 0 even for Created/Exited/Restarting containers,
-                # so a 0 exit is NOT conclusive proof the service actually
-                # started. Extensions whose containers intentionally exit
-                # after init (one-shot setup containers, extensions whose
-                # value is purely the setup_hook) can opt out via the
-                # manifest's `service.startup_check: false`, in which
-                # case compose's 0 exit is taken as success.
+                # Poll for running state; compose `up -d` returns 0 even for
+                # Created/Exited/Restarting containers, so a 0 exit is not
+                # conclusive proof the service actually started.
                 install_manifest = _read_manifest(ext_dir)
                 install_service_def = install_manifest.get("service", {}) if install_manifest else {}
                 if not isinstance(install_service_def, dict):
                     install_service_def = {}
                 container_name = install_service_def.get("container_name") or f"dream-{service_id}"
 
-                # Manifest-driven opt-out for one-shot / setup-only extensions
-                # whose containers intentionally exit (init containers,
-                # extensions whose value is purely the setup_hook). Setting
-                # `service.startup_check: false` skips the running-state poll
-                # — compose up's clean exit is taken as success. Default is
-                # True so existing long-running services are unchanged.
-                startup_check = install_service_def.get("startup_check", True)
+                deadline = time.monotonic() + 15
+                state: str | None = None
+                state_error = ""
+                while time.monotonic() < deadline:
+                    try:
+                        inspect_result = subprocess.run(
+                            ["docker", "inspect", "--format",
+                             "{{.State.Status}}|{{.State.Error}}", container_name],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                    except subprocess.TimeoutExpired:
+                        inspect_result = None
+                    if inspect_result is not None and inspect_result.returncode == 0:
+                        parts = inspect_result.stdout.strip().split("|", 1)
+                        state = parts[0] if parts else ""
+                        state_error = parts[1] if len(parts) > 1 else ""
+                        if state == "running":
+                            break
+                    time.sleep(1)
 
-                if startup_check:
-                    # Per-extension startup deadline; manifests with heavy init
-                    # (postgres, clickhouse, JVM-based services) can override the
-                    # 15s default via service.startup_timeout.
-                    startup_timeout = install_service_def.get("startup_timeout", 15)
-                    deadline = time.monotonic() + startup_timeout
-                    state: str | None = None
-                    state_error = ""
-                    while time.monotonic() < deadline:
-                        try:
-                            inspect_result = subprocess.run(
-                                ["docker", "inspect", "--format",
-                                 "{{.State.Status}}|{{.State.Error}}", container_name],
-                                capture_output=True, text=True, timeout=5,
-                            )
-                        except subprocess.TimeoutExpired:
-                            inspect_result = None
-                        if inspect_result is not None and inspect_result.returncode == 0:
-                            parts = inspect_result.stdout.strip().split("|", 1)
-                            state = parts[0] if parts else ""
-                            state_error = parts[1] if len(parts) > 1 else ""
-                            if state == "running":
-                                break
-                        time.sleep(1)
-
-                    if state != "running":
-                        msg = f"Container did not reach running state within {startup_timeout}s (state={state or 'unknown'})"
-                        if state_error:
-                            msg += f": {state_error}"
-                        _write_progress(service_id, "error", "Installation failed",
-                                        error=msg)
-                        return
+                if state != "running":
+                    msg = f"Container did not reach running state within 15s (state={state or 'unknown'})"
+                    if state_error:
+                        msg += f": {state_error}"
+                    _write_progress(service_id, "error", "Installation failed",
+                                    error=msg)
+                    return
 
                 # Step 4: Success
                 _write_progress(service_id, "started", "Service started")
