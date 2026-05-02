@@ -2184,6 +2184,13 @@ class AgentHandler(BaseHTTPRequestHandler):
         models_ini = INSTALL_DIR / "config" / "llama-server" / "models.ini"
         lemonade_yaml = INSTALL_DIR / "config" / "litellm" / "lemonade.yaml"
 
+        # Hoisted so the outer except's rollback can reference them even if
+        # an exception fires before the in-try captures complete.
+        env_backup = ""
+        ini_backup = ""
+        lemonade_backup = None
+        committed = False
+
         try:
             # Read current env BEFORE modification — needed for gpu_backend guard
             env_pre = load_env(env_path)
@@ -2390,6 +2397,7 @@ class AgentHandler(BaseHTTPRequestHandler):
                     subprocess.run(["docker", "restart", svc],
                                    capture_output=True, timeout=60)
                 json_response(self, 200, {"status": "activated", "model_id": model_id})
+                committed = True  # success-path complete; outer except must not rollback
             else:
                 # Rollback
                 logger.warning("Model activation failed — rolling back")
@@ -2433,6 +2441,14 @@ class AgentHandler(BaseHTTPRequestHandler):
                 json_response(self, 500, {"error": "Health check failed — rolled back to previous model", "rolled_back": True})
 
         except Exception as exc:
+            if not committed:
+                try:
+                    env_path.write_text(env_backup, encoding="utf-8")
+                    models_ini.write_text(ini_backup, encoding="utf-8")
+                    if lemonade_backup is not None:
+                        lemonade_yaml.write_text(lemonade_backup, encoding="utf-8")
+                except OSError:
+                    logger.exception("Rollback write failed during model-activate failure handling")
             json_response(self, 500, {"error": f"Model activation failed: {exc}"})
 
     def _handle_model_delete(self):
