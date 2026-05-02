@@ -37,6 +37,9 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== Bind address sweep ==="
 	@bash tests/test-bind-address-sweep.sh
+	@echo ""
+	@echo "=== resolve-compose-stack --null contract ==="
+	@bash tests/test-resolve-compose-null.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="
