@@ -144,6 +144,172 @@ try:
 except ImportError:
     yaml_available = False
 
+import re
+
+_LOOPBACK_VAR_DEFAULT_RE = re.compile(
+    r"^\$\{[A-Za-z_][A-Za-z0-9_]*:-127\.0\.0\.1\}$",
+)
+
+# Capabilities and security_opt strings that grant container escape primitives.
+_DANGEROUS_CAPS = {
+    "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "NET_RAW",
+    "DAC_OVERRIDE", "SETUID", "SETGID", "SYS_MODULE",
+    "SYS_RAWIO", "ALL",
+}
+_DANGEROUS_SECURITY_OPTS = {
+    "seccomp:unconfined", "apparmor:unconfined", "label:disable",
+}
+
+
+def _host_part_is_loopback(host):
+    if host == "127.0.0.1":
+        return True
+    return bool(_LOOPBACK_VAR_DEFAULT_RE.fullmatch(host))
+
+
+def _split_port_host(port_str):
+    """Mirror dashboard-api/_split_port_host: handle ${VAR:-127.0.0.1}: prefix."""
+    if port_str.startswith("${"):
+        end = port_str.find("}")
+        if end == -1 or end + 1 >= len(port_str) or port_str[end + 1] != ":":
+            return port_str, ""
+        return port_str[: end + 1], port_str[end + 2:]
+    if ":" not in port_str:
+        return None, port_str
+    host, _, rest = port_str.partition(":")
+    if host.isdigit():
+        return None, port_str
+    return host, rest
+
+
+def _scan_user_compose_content(compose_path):
+    """Reject compose fragments containing dangerous directives.
+
+    Mirrors dashboard-api/routers/extensions.py:_scan_compose_content (without
+    the FastAPI HTTPException dependency). Returns ``(ok, warnings)``: ``ok``
+    is False on any rejection, ``warnings`` is a list of human-readable
+    messages. User-extension contexts are always untrusted at the resolver
+    layer — no ``trusted=True`` exemption.
+    """
+    if not yaml_available:
+        return (False, [f"cannot scan {compose_path} — PyYAML unavailable; user-extension compose skipped for safety"])
+    try:
+        data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    except (yaml.YAMLError, OSError) as e:
+        return (False, [f"invalid compose file {compose_path}: {e}"])
+
+    if not isinstance(data, dict):
+        return (False, [f"compose file {compose_path} must be a YAML mapping"])
+
+    warnings = []
+    services = data.get("services", {})
+    if not isinstance(services, dict):
+        return (True, warnings)
+
+    ok = True
+
+    def reject(msg):
+        nonlocal ok
+        ok = False
+        warnings.append(msg)
+
+    for svc_name, svc_def in services.items():
+        if not isinstance(svc_def, dict):
+            continue
+        if svc_def.get("privileged") is True:
+            reject(f"service '{svc_name}' uses privileged mode")
+        if "build" in svc_def:
+            reject(f"service '{svc_name}' uses a local build — only pre-built images are allowed for user extensions")
+        user = svc_def.get("user")
+        if user is not None and str(user).split(":")[0] in ("root", "0"):
+            reject(f"service '{svc_name}' runs as root")
+        if svc_def.get("network_mode") == "host":
+            reject(f"service '{svc_name}' uses host network mode")
+        if svc_def.get("pid") == "host":
+            reject(f"service '{svc_name}' uses host PID namespace")
+        if svc_def.get("ipc") == "host":
+            reject(f"service '{svc_name}' uses host IPC namespace")
+        if svc_def.get("userns_mode") == "host":
+            reject(f"service '{svc_name}' uses host user namespace")
+        cap_add = svc_def.get("cap_add", [])
+        if isinstance(cap_add, list):
+            for cap in cap_add:
+                if str(cap).upper() in _DANGEROUS_CAPS:
+                    reject(f"service '{svc_name}' adds dangerous capability: {cap}")
+        security_opt = svc_def.get("security_opt", [])
+        if isinstance(security_opt, list):
+            for opt in security_opt:
+                opt_str = str(opt).lower().replace("=", ":")
+                if opt_str in _DANGEROUS_SECURITY_OPTS:
+                    reject(f"service '{svc_name}' uses dangerous security_opt '{opt}'")
+        if svc_def.get("devices"):
+            reject(f"service '{svc_name}' declares devices")
+        deploy = svc_def.get("deploy")
+        if isinstance(deploy, dict):
+            resources = deploy.get("resources")
+            if isinstance(resources, dict):
+                reservations = resources.get("reservations")
+                if isinstance(reservations, dict) and reservations.get("devices"):
+                    reject(f"service '{svc_name}' requests GPU passthrough via deploy.resources.reservations.devices")
+        volumes = svc_def.get("volumes", [])
+        if isinstance(volumes, list):
+            for vol in volumes:
+                vol_str = str(vol)
+                if "docker.sock" in vol_str:
+                    reject(f"service '{svc_name}' mounts the Docker socket")
+                vol_parts = vol_str.split(":")
+                if len(vol_parts) >= 2 and vol_parts[0].startswith("/"):
+                    reject(f"service '{svc_name}' bind-mounts absolute host path '{vol_parts[0]}'")
+        if svc_def.get("extra_hosts"):
+            reject(f"service '{svc_name}' declares extra_hosts")
+        if svc_def.get("sysctls"):
+            reject(f"service '{svc_name}' declares sysctls")
+        labels = svc_def.get("labels", [])
+        if isinstance(labels, dict):
+            label_keys = labels.keys()
+        elif isinstance(labels, list):
+            label_keys = [lbl.split("=", 1)[0] for lbl in labels if isinstance(lbl, str)]
+        else:
+            label_keys = []
+        for lk in label_keys:
+            if str(lk).startswith("com.docker.compose."):
+                reject(f"service '{svc_name}' uses reserved Docker Compose label '{lk}'")
+        ports = svc_def.get("ports", [])
+        if isinstance(ports, list):
+            for port in ports:
+                if isinstance(port, dict):
+                    host_ip = port.get("host_ip", "")
+                    if port.get("published") and not _host_part_is_loopback(host_ip):
+                        reject(f"service '{svc_name}' dict port binding must use host_ip 127.0.0.1 or '${{VAR:-127.0.0.1}}'")
+                else:
+                    port_str = str(port)
+                    host_part, rest = _split_port_host(port_str)
+                    if host_part is None:
+                        reject(f"service '{svc_name}' port '{port_str}' must use 127.0.0.1:host:container format")
+                        continue
+                    if not _host_part_is_loopback(host_part):
+                        reject(f"service '{svc_name}' port '{port_str}' must bind 127.0.0.1 (literal or '${{VAR:-127.0.0.1}}')")
+                        continue
+                    core = rest.split("/", 1)[0]
+                    if ":" not in core:
+                        reject(f"service '{svc_name}' port '{port_str}' must specify host:host_port:container_port")
+
+    top_volumes = data.get("volumes", {})
+    if isinstance(top_volumes, dict):
+        for vol_name, vol_def in top_volumes.items():
+            if not isinstance(vol_def, dict):
+                continue
+            driver_opts = vol_def.get("driver_opts", {})
+            if not isinstance(driver_opts, dict):
+                continue
+            vol_type = str(driver_opts.get("type", "")).lower()
+            device = str(driver_opts.get("device", ""))
+            if vol_type in ("none", "bind") and device.startswith("/"):
+                reject(f"named volume '{vol_name}' uses driver_opts to bind-mount host path '{device}'")
+
+    return (ok, warnings)
+
+
 # Discover enabled extension compose fragments via manifests
 ext_dir = script_dir / "extensions" / "services"
 if ext_dir.exists():
@@ -210,7 +376,7 @@ if ext_dir.exists():
             gpu_overlay = service_dir / f"compose.{gpu_backend}.yaml"
             if gpu_overlay.exists():
                 resolved.append(str(gpu_overlay.relative_to(script_dir)))
-            
+
             # Mode-specific overlay — depends_on for local/hybrid mode only.
             # Skip on Apple Silicon: macOS runs llama-server natively on the host
             # (Docker service has replicas: 0), so `depends_on: llama-server:
@@ -221,7 +387,7 @@ if ext_dir.exists():
                 local_mode_overlay = service_dir / "compose.local.yaml"
                 if local_mode_overlay.exists():
                     resolved.append(str(local_mode_overlay.relative_to(script_dir)))
-            
+
             # Multi-GPU overlay if we have more than 1 GPU
             if gpu_count > 1:
                 multi_gpu_overlay = service_dir / "compose.multigpu.yaml"
@@ -291,8 +457,29 @@ if user_ext_dir.exists():
                 # Get compose file from manifest, default to compose.yaml
                 compose_rel = service.get("compose_file", "compose.yaml")
                 if compose_rel and not compose_rel.endswith(".disabled"):
+                    # Boundary check: a malicious manifest could point compose_file
+                    # at "../../etc/passwd" or an absolute path. Resolve both sides
+                    # so a `/var → /private/var` symlink on macOS doesn't false-flag.
                     compose_path = service_dir / compose_rel
+                    try:
+                        compose_path.resolve().relative_to(service_dir.resolve())
+                    except ValueError:
+                        print(f"WARNING: {service_dir.name}: compose_file '{compose_rel}' "
+                              f"escapes the extension directory; skipping",
+                              file=sys.stderr)
+                        continue
                     if compose_path.exists():
+                        # Scan content before appending — user-ext composes are
+                        # untrusted. The dashboard-api scans at install time;
+                        # the resolver runs every `dream` invocation, so a
+                        # tampered-with compose dropped under data/user-extensions
+                        # without going through the install API would otherwise
+                        # bypass scanning entirely.
+                        ok, warnings = _scan_user_compose_content(compose_path)
+                        for w in warnings:
+                            print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
+                        if not ok:
+                            continue
                         resolved.append(str(compose_path.relative_to(script_dir)))
                     elif (service_dir / f"{compose_rel}.disabled").exists():
                         continue  # Service disabled — skip all overlays
@@ -302,7 +489,13 @@ if user_ext_dir.exists():
                 # GPU-specific overlay (filesystem discovery — not in manifest)
                 gpu_overlay = service_dir / f"compose.{gpu_backend}.yaml"
                 if gpu_overlay.exists():
-                    resolved.append(str(gpu_overlay.relative_to(script_dir)))
+                    # Fixed filename so traversal isn't possible, but the same
+                    # security checks apply to the overlay's content.
+                    ok, warnings = _scan_user_compose_content(gpu_overlay)
+                    for w in warnings:
+                        print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
+                    if ok:
+                        resolved.append(str(gpu_overlay.relative_to(script_dir)))
 
                 # Mode-specific overlay — depends_on for local/hybrid mode only.
                 # Skip on Apple Silicon: macOS runs llama-server natively on the host
@@ -342,10 +535,18 @@ if user_ext_dir.exists():
     except OSError as e:
         print(f"WARNING: Could not scan user-extensions: {e}", file=sys.stderr)
 
-# Include docker-compose.override.yml if it exists (user customizations)
+# Include docker-compose.override.yml if it exists (user customizations).
+# Even though the operator placed this file themselves, the resolver runs
+# under installer/CI and may handle composes from sources the operator
+# trusts less than themselves (cloned repo, restored backup). Apply the
+# same content scan as user extensions.
 override = script_dir / "docker-compose.override.yml"
 if override.exists():
-    resolved.append("docker-compose.override.yml")
+    ok, warnings = _scan_user_compose_content(override)
+    for w in warnings:
+        print(f"WARNING: docker-compose.override.yml: {w}", file=sys.stderr)
+    if ok:
+        resolved.append("docker-compose.override.yml")
 
 def to_flags(files):
     return " ".join(f"-f {f}" for f in files)
