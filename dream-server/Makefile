@@ -43,6 +43,9 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== dream list --json clean-stdout regression ==="
 	@bash tests/test-dream-list-json-clean-stdout.sh
+	@echo ""
+	@echo "=== _check_version_compat pipefail tolerance ==="
+	@bash tests/test-dream-cli-version-compat-pipefail.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="
