@@ -40,6 +40,9 @@ test: ## Run unit and contract tests
 	@echo ""
 	@echo "=== resolve-compose-stack --null contract ==="
 	@bash tests/test-resolve-compose-null.sh
+	@echo ""
+	@echo "=== dream list --json clean-stdout regression ==="
+	@bash tests/test-dream-list-json-clean-stdout.sh
 
 bats: ## Run BATS unit tests for shell libraries
 	@echo "=== BATS unit tests ==="
