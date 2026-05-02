@@ -235,6 +235,270 @@ else
     fail "Expected WARNING for absolute-ext compose_file"
 fi
 
+# ============================================================================
+# 14. User-ext path-traversal: compose_file with .. must not escape ext dir
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/user-traversal"
+cat > "$TEMP_DIR/data/user-extensions/user-traversal/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: user-traversal
+  name: User Traversal Test
+  compose_file: "../../../../../../etc/passwd"
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+
+ut_exit=0
+ut_stderr_file="$TEMP_DIR/user-traversal.stderr"
+ut_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$ut_stderr_file") || ut_exit=$?
+ut_stderr=$(cat "$ut_stderr_file")
+
+if [[ $ut_exit -ne 0 ]]; then
+    fail "User-ext traversal caused resolver to crash (exit $ut_exit)"
+elif echo "$ut_stdout" | grep -q "etc/passwd"; then
+    fail "User-ext traversal path INCLUDED in resolved stack (security regression)"
+else
+    pass "User-ext traversal compose_file rejected from resolved stack"
+fi
+
+if echo "$ut_stderr" | grep -qi "WARNING.*user-traversal.*escapes"; then
+    pass "WARNING emitted for user-ext traversal compose_file"
+else
+    fail "Expected WARNING for user-ext traversal compose_file"
+fi
+
+# ============================================================================
+# 15. User-ext compose with bare 0.0.0.0 port must be rejected
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/user-bareports"
+cat > "$TEMP_DIR/data/user-extensions/user-bareports/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: user-bareports
+  name: User Bare Ports
+  compose_file: compose.yaml
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+cat > "$TEMP_DIR/data/user-extensions/user-bareports/compose.yaml" <<'EOF'
+services:
+  user-bareports-svc:
+    image: nginx:latest
+    ports:
+      - "0.0.0.0:8080:80"
+EOF
+
+bp_stderr_file="$TEMP_DIR/user-bareports.stderr"
+bp_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$bp_stderr_file") || true
+bp_stderr=$(cat "$bp_stderr_file")
+
+if echo "$bp_stdout" | grep -q "user-bareports/compose.yaml"; then
+    fail "User-ext with 0.0.0.0 port INCLUDED in resolved stack"
+else
+    pass "User-ext with 0.0.0.0 port excluded from resolved stack"
+fi
+
+if echo "$bp_stderr" | grep -qi "WARNING.*user-bareports.*"; then
+    pass "WARNING emitted for user-ext 0.0.0.0 port"
+else
+    fail "Expected WARNING for user-ext 0.0.0.0 port"
+fi
+
+# ============================================================================
+# 16. User-ext compose with privileged: true must be rejected
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/user-priv"
+cat > "$TEMP_DIR/data/user-extensions/user-priv/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: user-priv
+  name: User Privileged
+  compose_file: compose.yaml
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+cat > "$TEMP_DIR/data/user-extensions/user-priv/compose.yaml" <<'EOF'
+services:
+  user-priv-svc:
+    image: nginx:latest
+    privileged: true
+EOF
+
+priv_stderr_file="$TEMP_DIR/user-priv.stderr"
+priv_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$priv_stderr_file") || true
+priv_stderr=$(cat "$priv_stderr_file")
+
+if echo "$priv_stdout" | grep -q "user-priv/compose.yaml"; then
+    fail "User-ext privileged INCLUDED in resolved stack"
+else
+    pass "User-ext privileged excluded from resolved stack"
+fi
+
+if echo "$priv_stderr" | grep -qi "WARNING.*user-priv.*privileged"; then
+    pass "WARNING emitted for user-ext privileged"
+else
+    fail "Expected WARNING for user-ext privileged"
+fi
+
+# ============================================================================
+# 17. User-ext compose with build: must be rejected
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/user-build"
+cat > "$TEMP_DIR/data/user-extensions/user-build/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: user-build
+  name: User Build
+  compose_file: compose.yaml
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+cat > "$TEMP_DIR/data/user-extensions/user-build/compose.yaml" <<'EOF'
+services:
+  user-build-svc:
+    build: .
+EOF
+
+build_stderr_file="$TEMP_DIR/user-build.stderr"
+build_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$build_stderr_file") || true
+build_stderr=$(cat "$build_stderr_file")
+
+if echo "$build_stdout" | grep -q "user-build/compose.yaml"; then
+    fail "User-ext build INCLUDED in resolved stack"
+else
+    pass "User-ext build excluded from resolved stack"
+fi
+
+if echo "$build_stderr" | grep -qi "WARNING.*user-build.*build"; then
+    pass "WARNING emitted for user-ext build directive"
+else
+    fail "Expected WARNING for user-ext build directive"
+fi
+
+# ============================================================================
+# 18. User-ext compose with docker.sock mount must be rejected
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/user-sock"
+cat > "$TEMP_DIR/data/user-extensions/user-sock/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: user-sock
+  name: User Sock
+  compose_file: compose.yaml
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+cat > "$TEMP_DIR/data/user-extensions/user-sock/compose.yaml" <<'EOF'
+services:
+  user-sock-svc:
+    image: nginx:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+EOF
+
+sock_stderr_file="$TEMP_DIR/user-sock.stderr"
+sock_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$sock_stderr_file") || true
+sock_stderr=$(cat "$sock_stderr_file")
+
+if echo "$sock_stdout" | grep -q "user-sock/compose.yaml"; then
+    fail "User-ext docker.sock INCLUDED in resolved stack"
+else
+    pass "User-ext docker.sock excluded from resolved stack"
+fi
+
+if echo "$sock_stderr" | grep -qi "WARNING.*user-sock.*Docker socket"; then
+    pass "WARNING emitted for user-ext docker.sock mount"
+else
+    fail "Expected WARNING for user-ext docker.sock mount"
+fi
+
+# ============================================================================
+# 19. User-ext compose with BIND_ADDRESS-default loopback port must be ACCEPTED
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/user-loopback-default"
+cat > "$TEMP_DIR/data/user-extensions/user-loopback-default/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: user-loopback-default
+  name: User Loopback Default
+  compose_file: compose.yaml
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+cat > "$TEMP_DIR/data/user-extensions/user-loopback-default/compose.yaml" <<'EOF'
+services:
+  user-loopback-default-svc:
+    image: nginx:latest
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:9091:80"
+EOF
+
+ld_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>/dev/null) || true
+
+if echo "$ld_stdout" | grep -q "user-loopback-default/compose.yaml"; then
+    pass "User-ext with BIND_ADDRESS-default loopback port accepted"
+else
+    fail "User-ext with BIND_ADDRESS-default loopback port should be accepted"
+fi
+
+# ============================================================================
+# 20. docker-compose.override.yml with bare 0.0.0.0 port must be rejected
+# ============================================================================
+cat > "$TEMP_DIR/docker-compose.override.yml" <<'EOF'
+services:
+  override-svc:
+    image: nginx:latest
+    ports:
+      - "0.0.0.0:9999:80"
+EOF
+
+ovr_stderr_file="$TEMP_DIR/override.stderr"
+ovr_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$ovr_stderr_file") || true
+ovr_stderr=$(cat "$ovr_stderr_file")
+
+if echo "$ovr_stdout" | grep -q "docker-compose.override.yml"; then
+    fail "Override with 0.0.0.0 port INCLUDED in resolved stack"
+else
+    pass "Override with 0.0.0.0 port excluded from resolved stack"
+fi
+
+if echo "$ovr_stderr" | grep -qi "WARNING.*docker-compose.override.yml"; then
+    pass "WARNING emitted for override with 0.0.0.0 port"
+else
+    fail "Expected WARNING for override with 0.0.0.0 port"
+fi
+
+# ============================================================================
+# 21. docker-compose.override.yml with loopback ports must be ACCEPTED
+# ============================================================================
+cat > "$TEMP_DIR/docker-compose.override.yml" <<'EOF'
+services:
+  override-svc-good:
+    image: nginx:latest
+    ports:
+      - "127.0.0.1:10001:80"
+EOF
+
+ovr_good_stdout=$(bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>/dev/null) || true
+
+if echo "$ovr_good_stdout" | grep -q "docker-compose.override.yml"; then
+    pass "Override with literal-loopback port accepted"
+else
+    fail "Override with literal-loopback port should be accepted"
+fi
+
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]
