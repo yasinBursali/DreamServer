@@ -4,9 +4,9 @@ The original Stable Diffusion web UI (based on Automatic1111). Features extensiv
 
 ## Privacy & Defense-in-depth
 
-The upstream `ai-dock` Forge image bundles `syncthing`, `quicktunnel`, `serviceportal`, and `sshd` for cloud workflows. These are autostarted by the image's bundled supervisord and would otherwise expose the host to remote relays, tunnel endpoints, and inbound SSH on default install.
+The upstream `ai-dock` Forge image bundles `syncthing`, `quicktunnel`, `serviceportal`, and `sshd` for cloud workflows, plus a `jupyter` notebook server. These are autostarted by the image's bundled supervisord and would otherwise expose the host to remote relays, tunnel endpoints, inbound SSH, and an unauthenticated notebook on default install.
 
-DreamServer disables them via `SUPERVISOR_NO_AUTOSTART=syncthing,quicktunnel,serviceportal,sshd` in `compose.yaml`. To re-enable any of them, override that env var in your `.env` or a compose override.
+DreamServer disables them via `SUPERVISOR_NO_AUTOSTART=syncthing,quicktunnel,serviceportal,sshd,jupyter` in `compose.yaml`. To re-enable any of them, override that env var in your `.env` or a compose override.
 
 `cloudflared` is also bundled but only autostarts when `CF_TUNNEL_TOKEN` is set, so it stays a no-op by default.
 
