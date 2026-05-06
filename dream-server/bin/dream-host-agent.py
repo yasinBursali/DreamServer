@@ -572,6 +572,15 @@ def _start_enable_retry(handler, service_id: str, lock: threading.Lock) -> None:
         threading.Thread(target=_thread_target, daemon=True).start()
     except Exception:
         lock.release()
+        # If 202 was already sent, the dashboard expects a progress
+        # transition. Without this, the stale "error" from the prior
+        # failed install stays visible. Best-effort write — if progress
+        # itself fails, prefer the original exception.
+        try:
+            _write_progress(service_id, "error", "Retry failed",
+                            error="Failed to start retry thread")
+        except Exception:
+            pass
         raise
 
 
