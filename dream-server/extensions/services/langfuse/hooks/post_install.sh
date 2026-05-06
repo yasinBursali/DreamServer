@@ -56,9 +56,21 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 is_container_running() {
-    # docker ps returns only running containers; --quiet is empty when none match.
+    # Returns:
+    #   0 = container is running
+    #   1 = container is not running (docker query succeeded, no match)
+    #   2 = unknown — docker query itself failed (permission denied, daemon
+    #       down, etc.). Caller MUST treat this as fail-safe and refuse to
+    #       chown, since we cannot rule out a live container racing with WAL
+    #       writes. Suppressing this error (e.g. 2>/dev/null) would silently
+    #       bypass the safety guard.
     local name="$1"
-    [[ -n "$(docker ps --quiet --filter "name=^${name}$" 2>/dev/null)" ]]
+    local out
+    if ! out=$(docker ps --quiet --filter "name=^${name}$" 2>&1); then
+        log "WARNING: 'docker ps' failed while checking '$name': $out"
+        return 2
+    fi
+    [[ -n "$out" ]]
 }
 
 chown_dir() {
@@ -71,9 +83,24 @@ chown_dir() {
     # live data directory races with WAL writes and gains nothing. Skip with
     # a clear log line so re-invocation of the hook on a healthy install is
     # safe.
-    if [[ -n "$guard_container" ]] && is_container_running "$guard_container"; then
-        log "$guard_container is running; skipping chown of $dir (ownership already correct)"
-        return 0
+    if [[ -n "$guard_container" ]]; then
+        local running_rc=0
+        is_container_running "$guard_container" || running_rc=$?
+        case "$running_rc" in
+            0)
+                log "$guard_container is running; skipping chown of $dir (ownership already correct)"
+                return 0
+                ;;
+            2)
+                log "ERROR: cannot determine whether '$guard_container' is running (docker query failed above). " \
+                    "Refusing to chown $dir — running chown -R on a live data directory races with WAL writes. " \
+                    "Resolve docker access (add user to docker group, or run with sudo), then retry the install."
+                return 1
+                ;;
+            *)
+                : # not running — fall through to chown
+                ;;
+        esac
     fi
 
     # Defensive: create the directory if the installer hasn't yet.
