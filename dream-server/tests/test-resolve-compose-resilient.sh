@@ -498,6 +498,49 @@ else
     fail "Override with literal-loopback port should be accepted"
 fi
 
+# Drop the override.yml so subsequent tests don't drag it back into the stack
+rm -f "$TEMP_DIR/docker-compose.override.yml"
+
+# ============================================================================
+# 22. User-ext compose with core-service-ID name collision must be REJECTED
+# ============================================================================
+mkdir -p "$TEMP_DIR/data/user-extensions/shadow-core"
+cat > "$TEMP_DIR/data/user-extensions/shadow-core/manifest.yaml" <<'EOF'
+schema_version: dream.services.v1
+service:
+  id: shadow-core
+  name: Shadow Core
+  gpu_backends: ["nvidia", "amd", "apple"]
+EOF
+cat > "$TEMP_DIR/data/user-extensions/shadow-core/compose.yaml" <<'EOF'
+services:
+  dashboard-api:
+    image: attacker/malicious:latest
+    ports:
+      - "127.0.0.1:8001:8001"
+EOF
+
+coll_stderr_file="$TEMP_DIR/collision.stderr"
+coll_stdout=$(USER_EXTENSIONS_DIR="$TEMP_DIR/data/user-extensions" \
+    bash "$ROOT_DIR/scripts/resolve-compose-stack.sh" \
+    --script-dir "$TEMP_DIR" --tier 1 --gpu-backend nvidia --skip-broken \
+    2>"$coll_stderr_file") || true
+coll_stderr=$(cat "$coll_stderr_file")
+
+if echo "$coll_stdout" | grep -q "shadow-core/compose.yaml"; then
+    fail "User-ext shadowing core service name INCLUDED in resolved stack"
+else
+    pass "User-ext shadowing core service name excluded from resolved stack"
+fi
+
+if echo "$coll_stderr" | grep -qi "collides.*core service"; then
+    pass "WARNING emitted for core-service name collision"
+else
+    fail "Expected WARNING for core-service name collision (got: $(echo "$coll_stderr" | tail -3))"
+fi
+
+rm -rf "$TEMP_DIR/data/user-extensions/shadow-core"
+
 echo ""
 echo "Result: $PASSED passed, $FAILED failed"
 [[ $FAILED -eq 0 ]]

@@ -137,13 +137,11 @@ if not resolved:
 if gpu_count > 1 and (script_dir / "docker-compose.multigpu.yml").exists():
     resolved.append("docker-compose.multigpu.yml")
 
-# Optional PyYAML — shared by built-in and user-installed extension loops.
-try:
-    import yaml
-    yaml_available = True
-except ImportError:
-    yaml_available = False
-
+# PyYAML is a hard requirement — extensions and overlays are YAML and must be
+# parsed for the compose security scan. Silent fallback used to hide install
+# breakage on systems without PyYAML (Arch/Alpine/Void/some macOS) and let
+# user-extension composes through unscanned. Fail loud here instead.
+import yaml
 import re
 
 _LOOPBACK_VAR_DEFAULT_RE = re.compile(
@@ -159,6 +157,26 @@ _DANGEROUS_CAPS = {
 _DANGEROUS_SECURITY_OPTS = {
     "seccomp:unconfined", "apparmor:unconfined", "label:disable",
 }
+
+# Core service IDs — user extensions must not declare services with these names
+# (would shadow the built-in services in the compose merge). Mirrors the
+# dashboard-api install endpoint's CORE_SERVICE_IDS / skip_name_collision check
+# so a hand-dropped or backup-restored extension under the user-extensions dir
+# can't override e.g. dashboard-api or llama-server. Loaded best-effort: if
+# config/core-service-ids.json is missing or unparseable, fall back to a
+# hardcoded list matching helpers.py CORE_SERVICE_IDS_FALLBACK.
+import json as _json_mod
+try:
+    _CORE_SERVICE_IDS = set(
+        _json_mod.loads((script_dir / "config" / "core-service-ids.json").read_text(encoding="utf-8"))
+    )
+except (OSError, ValueError):
+    _CORE_SERVICE_IDS = {
+        "ape", "comfyui", "dashboard", "dashboard-api", "dreamforge",
+        "embeddings", "langfuse", "litellm", "llama-server", "n8n",
+        "open-webui", "openclaw", "perplexica", "privacy-shield", "qdrant",
+        "searxng", "token-spy", "tts", "whisper",
+    }
 
 
 def _host_part_is_loopback(host):
@@ -191,8 +209,6 @@ def _scan_user_compose_content(compose_path):
     messages. User-extension contexts are always untrusted at the resolver
     layer — no ``trusted=True`` exemption.
     """
-    if not yaml_available:
-        return (False, [f"cannot scan {compose_path} — PyYAML unavailable; user-extension compose skipped for safety"])
     try:
         data = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
     except (yaml.YAMLError, OSError) as e:
@@ -216,6 +232,11 @@ def _scan_user_compose_content(compose_path):
     for svc_name, svc_def in services.items():
         if not isinstance(svc_def, dict):
             continue
+        # Name-collision: user-extension service names must not shadow
+        # built-in core services in the compose merge. Mirrors the
+        # dashboard-api install endpoint's skip_name_collision=False path.
+        if svc_name in _CORE_SERVICE_IDS:
+            reject(f"service '{svc_name}' collides with a built-in core service name")
         if svc_def.get("privileged") is True:
             reject(f"service '{svc_name}' uses privileged mode")
         if "build" in svc_def:
@@ -329,10 +350,8 @@ if ext_dir.exists():
             with open(manifest_path) as f:
                 if manifest_path.suffix == ".json":
                     manifest = json.load(f)
-                elif yaml_available:
-                    manifest = yaml.safe_load(f)
                 else:
-                    continue  # skip YAML manifests when PyYAML unavailable
+                    manifest = yaml.safe_load(f)
             if not isinstance(manifest, dict):
                 print(f"WARNING: empty/non-dict manifest for {service_dir.name} at {manifest_path}, skipping", file=sys.stderr)
                 continue
@@ -396,7 +415,7 @@ if ext_dir.exists():
 
         except Exception as e:
             # Narrow exception handling to specific parse/structure errors
-            yaml_error = yaml_available and hasattr(yaml, 'YAMLError') and isinstance(e, yaml.YAMLError)
+            yaml_error = isinstance(e, yaml.YAMLError)
             json_error = isinstance(e, json.JSONDecodeError)
             structure_error = isinstance(e, (KeyError, TypeError))
 
@@ -432,10 +451,8 @@ if user_ext_dir.exists():
                     with open(manifest_path) as f:
                         if manifest_path.suffix == ".json":
                             manifest = json.load(f)
-                        elif yaml_available:
-                            manifest = yaml.safe_load(f)
                         else:
-                            manifest = None  # PyYAML unavailable — fall back to defaults
+                            manifest = yaml.safe_load(f)
                     if manifest is not None and not isinstance(manifest, dict):
                         print(f"WARNING: empty/non-dict manifest for {service_dir.name} at {manifest_path}, skipping", file=sys.stderr)
                         continue
@@ -447,8 +464,7 @@ if user_ext_dir.exists():
                 # Apply gpu_backends filter — same predicate as the built-in loop above.
                 # Gated on isinstance(manifest, dict) so the manifest-less compat
                 # carve-out (legacy user extensions that pre-date the manifest convention)
-                # falls through unfiltered. PyYAML-unavailable + manifest_path-is-None
-                # both end up with manifest=None, both intentionally bypass the filter.
+                # falls through unfiltered.
                 if isinstance(manifest, dict):
                     backends = service.get("gpu_backends", ["amd", "nvidia"])
                     # "none" means CPU-only — compatible with any GPU backend
@@ -507,17 +523,31 @@ if user_ext_dir.exists():
                 if dream_mode in ("local", "hybrid", "lemonade") and gpu_backend != "apple":
                     local_mode_overlay = service_dir / "compose.local.yaml"
                     if local_mode_overlay.exists():
-                        resolved.append(str(local_mode_overlay.relative_to(script_dir)))
+                        # Same content scan as compose.yaml/gpu overlay above —
+                        # without it, a malicious user extension can put
+                        # privileged: true / docker.sock mounts in compose.local.yaml
+                        # and reach the host since DREAM_MODE defaults to "local".
+                        ok, warnings = _scan_user_compose_content(local_mode_overlay)
+                        for w in warnings:
+                            print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
+                        if ok:
+                            resolved.append(str(local_mode_overlay.relative_to(script_dir)))
 
                 # Multi-GPU overlay if we have more than 1 GPU
                 if gpu_count > 1:
                     multi_gpu_overlay = service_dir / "compose.multigpu.yaml"
                     if multi_gpu_overlay.exists():
-                        resolved.append(str(multi_gpu_overlay.relative_to(script_dir)))
+                        # Fixed filename, but same content scan applies — see
+                        # the gpu/local-mode overlay scans above.
+                        ok, warnings = _scan_user_compose_content(multi_gpu_overlay)
+                        for w in warnings:
+                            print(f"WARNING: {service_dir.name}: {w}", file=sys.stderr)
+                        if ok:
+                            resolved.append(str(multi_gpu_overlay.relative_to(script_dir)))
 
             except Exception as e:
                 # Narrow exception handling to specific parse/structure errors
-                yaml_error = yaml_available and hasattr(yaml, 'YAMLError') and isinstance(e, yaml.YAMLError)
+                yaml_error = isinstance(e, yaml.YAMLError)
                 json_error = isinstance(e, json.JSONDecodeError)
                 structure_error = isinstance(e, (KeyError, TypeError))
 
