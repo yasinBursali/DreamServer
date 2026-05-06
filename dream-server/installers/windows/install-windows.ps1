@@ -607,7 +607,7 @@ if ($dryRun) {
         if (-not (Test-Path $_composeLogDir)) { New-Item -ItemType Directory -Path $_composeLogDir -Force | Out-Null }
         $_composeLog = Join-Path $_composeLogDir "compose-up.log"
         Write-AI "Starting services... this may take several minutes."
-        & docker compose @composeFlags up -d *> $_composeLog
+        & docker compose @composeFlags up -d --remove-orphans *> $_composeLog
         $composeExit = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
         # Show tail of compose output for immediate feedback
