@@ -607,6 +607,25 @@ _compose_run_with_summary() {
 }
 
 #=============================================================================
+# Warn (don't exit) when the current user can't reach the Docker daemon on
+# Linux. Phase 05 of the installer sets DOCKER_CMD="sudo docker" for users
+# not in the docker group, but dream-cli calls bare `docker compose` and
+# can't see that. Without this check, --rebuild-images fails with an opaque
+# "permission denied while trying to connect to the Docker daemon socket"
+# and users have no idea what to do next. macOS Docker Desktop grants
+# socket access to the logged-in user, so the check is Linux-only.
+#=============================================================================
+_check_docker_access() {
+    [[ "$(uname -s)" == "Darwin" ]] && return 0
+    if id -nG 2>/dev/null | grep -qw docker && docker ps >/dev/null 2>&1; then
+        return 0
+    fi
+    warn "Current user cannot reach the Docker daemon (not in 'docker' group, or daemon unreachable)."
+    warn "If the next step fails with 'permission denied', run:  newgrp docker  (current shell)"
+    warn "or log out and back in (all shells), then re-run your dream command."
+}
+
+#=============================================================================
 # Rebuild local-built images (opt-in via --rebuild-images on restart/start/update).
 # Always rebuilds: dashboard, dashboard-api, ape, token-spy, privacy-shield.
 # Conditionally rebuilds based on .env state:
@@ -627,6 +646,7 @@ _dream_cli_rebuild_images() {
     [[ "${ENABLE_COMFYUI:-}" == "true" ]] && svcs+=(comfyui)
     [[ "${GPU_BACKEND:-}" == "amd" ]] && svcs+=(llama-server)
     [[ "${ENABLE_DREAMFORGE:-}" == "true" ]] && svcs+=(dreamforge)
+    _check_docker_access
     log "Rebuilding local-built images (--rebuild-images)..."
     if ! docker compose "${flags[@]}" build --no-cache "${svcs[@]}"; then
         warn "One or more images failed to rebuild (continuing — see compose output above)"
