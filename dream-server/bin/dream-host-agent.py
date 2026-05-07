@@ -1956,7 +1956,12 @@ class AgentHandler(BaseHTTPRequestHandler):
             # Regenerate LiteLLM lemonade config so it routes to the new model.
             # Only written on AMD installs where lemonade.yaml exists.
             if lemonade_yaml.exists():
-                lemonade_api_key = os.environ.get("LITELLM_LEMONADE_API_KEY", "sk-lemonade")
+                # Read from .env (already loaded as env_pre above). The host-agent
+                # systemd unit does not source .env as an EnvironmentFile, so
+                # os.environ is unreliable for installer-written values like the
+                # rotated LITELLM_LEMONADE_API_KEY — falling back to the legacy
+                # static "sk-lemonade" would silently revert key rotation.
+                lemonade_api_key = env_pre.get("LITELLM_LEMONADE_API_KEY", "sk-lemonade")
                 lemonade_yaml.write_text(
                     f"model_list:\n"
                     f"  - model_name: default\n"
@@ -2264,7 +2269,11 @@ def _write_lemonade_config(install_dir: Path, gguf_file: str):
     Mirrors bootstrap-upgrade.sh lines 369-382.
     """
     config_path = install_dir / "config" / "litellm" / "lemonade.yaml"
-    lemonade_api_key = os.environ.get("LITELLM_LEMONADE_API_KEY", "sk-lemonade")
+    # Read from .env via load_env, NOT os.environ. The host-agent systemd
+    # unit does not source .env as an EnvironmentFile, so os.environ is
+    # unreliable for installer-written values; falling back to the legacy
+    # static "sk-lemonade" would silently revert key rotation.
+    lemonade_api_key = load_env(install_dir / ".env").get("LITELLM_LEMONADE_API_KEY", "sk-lemonade")
     content = (
         "model_list:\n"
         "  - model_name: \"*\"\n"
