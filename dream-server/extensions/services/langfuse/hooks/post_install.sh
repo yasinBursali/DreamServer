@@ -33,12 +33,15 @@ if [[ -z "$INSTALL_DIR" ]]; then
     exit 2
 fi
 
-# Platform check — only act on Linux-family hosts (including WSL2).
-# macOS Docker Desktop masks uid mismatch; chown would be a harmless
-# no-op there but we skip to keep the intent explicit.
+# Platform check — only act on real Linux (and WSL2, which reports "Linux").
+# Whitelist instead of blacklist so we don't accidentally run the sudo chown
+# path under Git Bash on Windows (uname -s = MINGW64_NT-*), MSYS2
+# (MSYS_NT-*), or Cygwin (CYGWIN_NT-*) — Docker Desktop on Windows handles
+# uid translation in-image, and sudo isn't available there anyway.
+# Same applies to macOS Docker Desktop (Darwin).
 PLATFORM="$(uname -s)"
-if [[ "$PLATFORM" == "Darwin" ]]; then
-    log "macOS Docker Desktop handles uid translation; no chown needed"
+if [[ "$PLATFORM" != "Linux" ]]; then
+    log "Skipping chown on $PLATFORM (uid alignment only needed on native Linux Docker)"
     exit 0
 fi
 
